@@ -199,3 +199,15 @@ cython_debug/
 .DS_Store
 */.DS_Store
 
+# media files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.wav
+*.mp3
+*.json

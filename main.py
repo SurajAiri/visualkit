@@ -159,11 +159,11 @@ def create_test_project():
 def test_simple_editor():
     print("=== Testing Simple Video Editor ===")
 
-    # project = create_test_project()
+    project = create_test_project()
 
-    project = create_project_from_basic_timestamps_json(
-        "prompts.json", "test.json", "generated_images"
-    )
+    # project = create_project_from_basic_timestamps_json(
+    #     "prompts.json", "test.json", "generated_images"
+    # )
     # print(json.dumps(project, indent=2))
     with open("simple_editor_test.json", "w") as f:
         json.dump(project, f, indent=2)
