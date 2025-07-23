@@ -1,8 +1,8 @@
 import random
 from pathlib import Path
 
-from src.visualkit.media_element import MediaElement
-from src.visualkit.transitions import TransitionElement
+from visualkit.media_element import MediaElement
+from visualkit.transitions import TransitionElement
 
 
 class ProjectCreator:
