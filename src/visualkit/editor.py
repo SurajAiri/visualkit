@@ -25,6 +25,10 @@ class SimpleVideoEditor:
             self.config.width = config_data.get("width", self.config.width)
             self.config.height = config_data.get("height", self.config.height)
             self.config.fps = config_data.get("fps", self.config.fps)
+            self.config.codec = config_data.get("codec", self.config.codec)
+            self.config.resize_method = config_data.get(
+                "resize_method", self.config.resize_method
+            )
             self.config.__post_init__()
             self.text_renderer = TextRenderer(self.config)
             assets = json_data.get("assets", {})
