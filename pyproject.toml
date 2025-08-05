@@ -4,22 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "visualkit"
-version = "0.0.1"
+version = "0.0.2"
 description = "Lightning-fast Python package for video frame effects and transitions. Comprehensive collection of visual effects with optimized OpenCV backend for maximum rendering speed."
 readme = "README.md"
-authors = [
-    { name = "Suraj Airi", email = "surajairi.ml@gmail.com" }
-]
+authors = [{ name = "Suraj Airi", email = "surajairi.ml@gmail.com" }]
 license = { text = "MIT license" }
 requires-python = ">=3.9"
-dependencies = [
-    "opencv-python>=4.12.0.88",
-]
+dependencies = ["opencv-python>=4.12.0.88"]
 
 [dependency-groups]
-dev = [
-    "ruff>=0.12.1",
-]
+dev = ["ruff>=0.12.1"]
 
 
 [tool.setuptools.packages.find]
@@ -27,4 +21,3 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
-
