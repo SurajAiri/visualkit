@@ -1,8 +1,8 @@
 import random
 from pathlib import Path
 
-from visualkit.media_element import MediaElement
-from visualkit.transitions import TransitionElement
+from .media_element import MediaElement
+from .transitions import TransitionElement
 
 
 class ProjectCreator:
@@ -11,11 +11,12 @@ class ProjectCreator:
         media: dict,
         transcript: dict,
         media_dir: str = "",
+        file_extension: str = "jpg",
         resolution: tuple[int, int] = (720, 1280),
         fps: int = 30,
-        codec: str = "mp4v",
+        codec: str = "avc1",  # Options: avc1, hevc, vp9
         transition_duration: float = 1.0,
-        resize_method: str = "adaptive",  # Options: smart, adaptive, gradual, aspect_ratio
+        resize_method: str = "fill",  # Options: smart, adaptive, gradual, aspect_ratio
     ):
         """
         Creates a project configuration from media and transcript data.
@@ -32,6 +33,7 @@ class ProjectCreator:
                 - text (str): Text of the subtitle.
 
             media_dir (str): Directory containing media files.
+            file_extension (str): File extension for media files. [default: "jpg"]
             resolution (tuple): Video resolution as (width, height).
             fps (int): Frames per second for the video.
             codec (str): Codec to use for video encoding.
@@ -53,78 +55,90 @@ class ProjectCreator:
             "main_layer": [],
             "subtitle_layers": [],
         }
-        total_media = len(media["media"])
-        # load media assets
-        for i, entry in enumerate(media["media"]):
-            media_id = f"media_{i + 1:02d}"
-            media_path: Path = Path(media_dir) / entry["file_path"]
-            media_type = entry.get("type", "image")
-            project["assets"][media_id] = {
-                "path": str(media_path),
-                "type": media_type,
-            }
-            # if not first index, add a transition
-            duration = float(entry["end_time"]) - float(entry["start_time"])
-            taken = False
-
-            if i > 0 and duration > 1:
-                project["main_layer"].append(
-                    {
-                        "type": "transition",
-                        "duration": transition_duration,
-                        "transition_type": random.choice(
-                            TransitionElement.get_available_transitions()
-                        ),
-                    }
+        try:
+            total_media = len(media["media"])
+            # load media assets
+            for i, entry in enumerate(media["media"]):
+                media_id = f"media_{i + 1:02d}"
+                file_path = (
+                    entry.get("file_path", None) or f"image_{i}.{file_extension}"
                 )
-                taken = True
-
-            # calculate transition overlapping duration for media element
-            sub_duration = 0
-            if not taken or total_media == 1:  # Only one media element
-                sub_duration = 0
-            elif i == 0 or i == total_media - 1:  # first or last media
-                sub_duration = transition_duration / 2
-            else:  # middle media
-                sub_duration = transition_duration
-
-            if media_type == "image":
-                project["main_layer"].append(
-                    {
-                        "type": "media",
-                        "media": media_id,
-                        "duration": round(duration - sub_duration, 3),
-                        "effect": entry.get(
-                            "effect", random.choice(MediaElement.get_moving_effects())
-                        ),
-                    }
+                media_path: str = (
+                    file_path
+                    if (media_dir is None or media_dir == "")
+                    else f"{media_dir}/{file_path}"
                 )
-            elif media_type == "video":
-                # todo: handle video asset properly
-                project["main_layer"].append(
-                    {
-                        "type": "media",
-                        "media": media_id,
-                        "duration": entry.get("duration", 5.0),
-                    }
-                )
-
-        # transcript elements for subtitle layers
-        subtitle_layer = {
-            "name": "main_subtitles",
-            "elements": [],
-        }
-
-        for seg in transcript["segments"]:
-            subtitle_layer["elements"].append(
-                {
-                    "start_time": seg["start"],
-                    "end_time": seg["end"],
-                    "text": seg["text"],
-                    "animation_type": "typewriter",
+                media_type = entry.get("type", "image")
+                project["assets"][media_id] = {
+                    "path": str(media_path),
+                    "type": media_type,
                 }
-            )
+                # if not first index, add a transition
+                duration = float(entry["end_time"]) - float(entry["start_time"])
+                taken = False
 
-        project["subtitle_layers"].append(subtitle_layer)
+                if i > 0 and duration > 1:
+                    project["main_layer"].append(
+                        {
+                            "type": "transition",
+                            "duration": transition_duration,
+                            "transition_type": random.choice(
+                                TransitionElement.get_available_transitions()
+                            ),
+                        }
+                    )
+                    taken = True
 
-        return project
+                # calculate transition overlapping duration for media element
+                sub_duration = 0
+                if not taken or total_media == 1:  # Only one media element
+                    sub_duration = 0
+                elif i == 0 or i == total_media - 1:  # first or last media
+                    sub_duration = transition_duration / 2
+                else:  # middle media
+                    sub_duration = transition_duration
+
+                if media_type == "image":
+                    project["main_layer"].append(
+                        {
+                            "type": "media",
+                            "media": media_id,
+                            "duration": round(duration - sub_duration, 3),
+                            "effect": entry.get(
+                                "effect",
+                                random.choice(MediaElement.get_moving_effects()),
+                            ),
+                        }
+                    )
+                elif media_type == "video":
+                    # todo: handle video asset properly
+                    project["main_layer"].append(
+                        {
+                            "type": "media",
+                            "media": media_id,
+                            "duration": entry.get("duration", 5.0),
+                        }
+                    )
+
+            # transcript elements for subtitle layers
+            subtitle_layer = {
+                "name": "main_subtitles",
+                "elements": [],
+            }
+
+            for seg in transcript["sentences"]:
+                subtitle_layer["elements"].append(
+                    {
+                        "start_time": seg["start"],
+                        "end_time": seg["end"],
+                        "text": seg["text"],
+                        "animation_type": "typewriter",
+                    }
+                )
+
+            project["subtitle_layers"].append(subtitle_layer)
+
+            return project
+        except Exception as e:
+            print(f"Error creating project: {e}")
+            raise ValueError("Failed to create project") from e
