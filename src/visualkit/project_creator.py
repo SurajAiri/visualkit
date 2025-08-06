@@ -14,7 +14,7 @@ class ProjectCreator:
         file_extension: str = "jpg",
         resolution: tuple[int, int] = (720, 1280),
         fps: int = 30,
-        codec: str = "avc1",  # Options: avc1, hevc, vp9
+        codec: str = "mp4v",  # Options: avc1, hevc, vp9, mp4v (recommended)
         transition_duration: float = 1.0,
         resize_method: str = "fill",  # Options: smart, adaptive, gradual, aspect_ratio
     ):

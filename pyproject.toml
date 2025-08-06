@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "visualkit"
-version = "0.0.2"
+version = "0.1.1"
 description = "Lightning-fast Python package for video frame effects and transitions. Comprehensive collection of visual effects with optimized OpenCV backend for maximum rendering speed."
 readme = "README.md"
 authors = [{ name = "Suraj Airi", email = "surajairi.ml@gmail.com" }]
