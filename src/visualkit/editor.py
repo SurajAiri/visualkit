@@ -1,11 +1,11 @@
-from typing import Any, Dict
+from typing import Any, Dict, Union
 
 import cv2
 import numpy as np
 
 from visualkit.config import VideoConfig
 from visualkit.enums import AnimationType
-from visualkit.media_element import MediaElement
+from visualkit.media_element import MediaElement, VideoMediaElement
 from visualkit.text_element import SubtitleElement, TextRenderer
 from visualkit.timeline import Timeline
 from visualkit.transitions import TransitionElement
@@ -13,7 +13,7 @@ from visualkit.utils import logger
 
 
 class SimpleVideoEditor:
-    def __init__(self, config: VideoConfig | None = None):
+    def __init__(self, config: Union[VideoConfig, None] = None):
         self.config = config or VideoConfig()
         self.text_renderer = TextRenderer(self.config)
         self.timeline = Timeline()
@@ -41,9 +41,29 @@ class SimpleVideoEditor:
                     duration = element_data.get("duration", 5.0)
                     effect = element_data.get("effect", "none")
                     if media_id in assets:
-                        asset_path = assets[media_id]["path"]
+                        asset_info = assets[media_id]
+                        asset_path = asset_info.get("path")
+                        asset_kind = asset_info.get("type", "image")
                         try:
-                            media_element = MediaElement(asset_path, duration, effect)
+                            if asset_kind == "video":
+                                # If duration not explicitly given, derive from clip
+                                if "duration" not in element_data:
+                                    cap = cv2.VideoCapture(asset_path)
+                                    if cap.isOpened():
+                                        fps_v = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                                        frame_count = (
+                                            cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0
+                                        )
+                                        if fps_v > 0 and frame_count > 0:
+                                            duration = frame_count / fps_v
+                                    cap.release()
+                                media_element = VideoMediaElement(
+                                    asset_path, duration, effect
+                                )
+                            else:
+                                media_element = MediaElement(
+                                    asset_path, duration, effect
+                                )
                             self.timeline.add_element(
                                 media_element, current_time, current_time + duration
                             )

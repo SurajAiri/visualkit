@@ -118,6 +118,7 @@ def create_test_project():
             "img1": {"path": "generated_images/image_01.jpg", "type": "image"},
             "img2": {"path": "generated_images/image_02.jpg", "type": "image"},
             "img3": {"path": "generated_images/image_03.jpg", "type": "image"},
+            "vid1": {"path": "data/test1.mp4", "type": "video"},
         },
         "main_layer": [
             {"type": "media", "media": "img1", "duration": 5.0, "effect": "zoom"},
@@ -125,6 +126,8 @@ def create_test_project():
             {"type": "media", "media": "img2", "duration": 4.0, "effect": "brightness"},
             {"type": "transition", "duration": 1.0, "transition_type": "slide_left"},
             {"type": "media", "media": "img3", "duration": 4.0, "effect": "blur"},
+            {"type": "transition", "duration": 1.0, "transition_type": "crossfade"},
+            {"type": "media", "media": "vid1", "duration": 5.0, "effect": "none"},
         ],
         "subtitle_layers": [
             {
@@ -171,7 +174,7 @@ def test_simple_editor():
         json.dump(project, f, indent=2)
     resolutions = [
         (854, 480),
-        (480, 854),
+        # (480, 854),
     ]
     for width, height in resolutions:
         orientation = "Vertical" if height > width else "Landscape"

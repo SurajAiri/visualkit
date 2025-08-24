@@ -1354,3 +1354,104 @@ class MediaElement:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+
+
+class VideoMediaElement(MediaElement):
+    """Media element for video clips (separate from still images).
+
+    This subclass decodes video frames on demand according to the local
+    timestamp inside the element's duration. Effects are reused from the
+    parent class.
+    """
+
+    def __init__(self, asset_path: str, duration: float, effect_type: str = "none"):
+        super().__init__(asset_path, duration, effect_type)
+        self._cap = cv2.VideoCapture(self.asset_path)
+        if not self._cap.isOpened():  # degrade gracefully
+            logger.error(f"Could not open video file: {self.asset_path}")
+            self._video_fps = 0.0
+            self._video_frame_count = 0
+        else:
+            self._video_fps = self._cap.get(cv2.CAP_PROP_FPS) or 30.0
+            self._video_frame_count = int(self._cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        self._last_video_frame_index = -1
+
+    def get_frame(self, timestamp: float, config: VideoConfig) -> np.ndarray:  # type: ignore[override]
+        try:
+            if self._video_fps <= 0 or self._video_frame_count <= 0:
+                # Fallback to black frame
+                return np.zeros((config.height, config.width, 3), dtype=np.uint8)
+
+            # Map local element timestamp to underlying video timeline
+            video_duration = self._video_frame_count / self._video_fps
+            # Use proportional mapping so element duration can trim/extend
+            underlying_time = min(
+                video_duration - 1e-4,
+                (timestamp / self.duration) * video_duration,
+            )
+            target_index = int(underlying_time * self._video_fps)
+
+            if target_index != self._last_video_frame_index + 1:
+                # Seek if not sequential
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, target_index)
+
+            ret, frame = self._cap.read()
+            if not ret or frame is None:
+                # One retry
+                self._cap.set(cv2.CAP_PROP_POS_FRAMES, target_index)
+                ret, frame = self._cap.read()
+            if not ret or frame is None:
+                return np.zeros((config.height, config.width, 3), dtype=np.uint8)
+
+            self._last_video_frame_index = target_index
+
+            enlarged = self._enlarge_frame(frame, config)
+
+            if (
+                self._last_effect_frame is None
+                or abs(timestamp - self._last_timestamp) > 0.01
+            ):
+                effected = self._apply_effect(enlarged.copy(), timestamp, config)
+                self._last_effect_frame = effected
+                self._last_timestamp = timestamp
+            return self._last_effect_frame.copy()
+        except Exception as e:  # pragma: no cover - safety net
+            logger.error(f"Video frame error {self.asset_path}: {e}")
+            return np.zeros((config.height, config.width, 3), dtype=np.uint8)
+
+    def _enlarge_frame(self, frame: np.ndarray, config: VideoConfig) -> np.ndarray:
+        """Create enlarged frame (2.5x target) keeping aspect ratio similar to
+        image implementation.
+        """
+        target_w, target_h = config.width, config.height
+        enlarged_w = int(target_w * 2.5)
+        enlarged_h = int(target_h * 2.5)
+        try:
+            h, w = frame.shape[:2]
+            aspect_src = w / h
+            aspect_dst = enlarged_w / enlarged_h
+            if aspect_src > aspect_dst:
+                new_h = enlarged_h
+                new_w = int(enlarged_h * aspect_src)
+            else:
+                new_w = enlarged_w
+                new_h = int(enlarged_w / aspect_src)
+            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            y_off = max(0, (new_h - enlarged_h) // 2)
+            x_off = max(0, (new_w - enlarged_w) // 2)
+            cropped = resized[y_off : y_off + enlarged_h, x_off : x_off + enlarged_w]
+            if cropped.shape[:2] != (enlarged_h, enlarged_w):
+                pad = np.zeros((enlarged_h, enlarged_w, 3), dtype=np.uint8)
+                y_s = (enlarged_h - cropped.shape[0]) // 2
+                x_s = (enlarged_w - cropped.shape[1]) // 2
+                pad[y_s : y_s + cropped.shape[0], x_s : x_s + cropped.shape[1]] = (
+                    cropped
+                )
+                return pad
+            return cropped
+        except Exception:
+            return np.zeros((enlarged_h, enlarged_w, 3), dtype=np.uint8)
+
+    def cleanup(self):  # type: ignore[override]
+        super().cleanup()
+        # Additional video specific cleanup handled by parent releasing cap
