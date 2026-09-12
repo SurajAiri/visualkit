@@ -129,7 +129,8 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+.env*
+!.env.example
 .venv
 env/
 venv/
@@ -199,15 +200,28 @@ cython_debug/
 .DS_Store
 */.DS_Store
 
-# media files
+# artifacts
+artifacts/
+artifact/
+
+# large files
+*.zip
+*.tar.gz
 *.mp4
-*.mov
-*.avi
 *.mkv
-*.jpg
-*.jpeg
-*.png
-*.gif
-*.wav
+*.avi
+*.mov
+*.iso
+*.exe
+*.dll
+*.bin
+*.log
+*.csv
+*.xlsx
+*.pdf
+*.docx
+*.pptx
 *.mp3
-*.json
+*.wav
+
+ref/

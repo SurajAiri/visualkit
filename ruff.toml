@@ -29,22 +29,23 @@ exclude = [
 ]
 
 # Same as Black.
-line-length = 88
+line-length = 110
 indent-width = 4
 
-# Assume Python 3.9
-target-version = "py39"
+
+# Assume Python 3.10
+target-version = "py310"
 
 [lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`) codes by default.
 # Unlike Flake8, Ruff doesn't enable pycodestyle warnings (`W`) or
 # McCabe complexity (`C901`) by default.
 select = ["E4", "E7", "E9", "F"]
-extend-select = ["E501","N","R","I"]
+extend-select = ["E501", "N", "R", "I"]
 ignore = ["F401"]
 
 # Ignore line length for files in src/prompts directory
-per-file-ignores = {"src/prompts/*" = ["E501"]}
+per-file-ignores = { "src/*/prompts/*" = ["E501"] }
 
 # Allow fix for all enabled rules (when `--fix`) is provided.
 fixable = ["ALL"]
