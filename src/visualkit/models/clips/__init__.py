@@ -9,6 +9,11 @@ from .media import MediaClip
 from .text import TextClip, TextStyle
 from .visual import Transform, VisualClip
 
+VisualContent = Annotated[
+    Union[MediaClip, CodedVisualClip, TextClip],
+    Field(discriminator="clip_type"),
+]
+AudioContent = Annotated[AudioClip, Field(discriminator="clip_type")]
 Clip = Annotated[Union[AudioClip, TextClip, MediaClip, CodedVisualClip], Field(discriminator="clip_type")]
 
 __all__ = [
@@ -26,4 +31,6 @@ __all__ = [
     "Transform",
     "VisualClip",
     "Clip",
+    "VisualContent",
+    "AudioContent",
 ]
