@@ -18,6 +18,13 @@ class Size(BaseModel):
     height: float = Field(default=0.0, description="Height of the size")
 
 
+class Source(BaseModel):
+    """Represents a media source for a clip."""
+
+    source: str = Field(..., description="Reference to the asset or media source for the clip")
+    source_start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
+
+
 class BaseClip(BaseModel, ABC):
     """Base Class for all media & visual clips placed on a track"""
 
@@ -27,8 +34,7 @@ class BaseClip(BaseModel, ABC):
     clip_type: str
 
     # changable properties
-    source: str = Field(..., description="Reference to the asset or media source for the clip")
-    source_start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
+    start: Time = Field(default=Time.zero(), description="Start time of the clip on the timeline")
     duration: Time = Field(default=Time.zero(), description="Duration of the clip")
     speed: float = Field(default=1.0, ge=0.0, description="Playback speed of the clip")
 
@@ -61,6 +67,7 @@ class MediaClip(VisualClip):
     clip_type: Literal["media"] = "media"
 
     # properties specific to media clips
+    source: Source = Field(..., description="Reference to the asset or media source for the clip")
     fps: float = Field(default=30.0, gt=0.0, description="Frames per second of the media clip")
     resolution: tuple[int, int] = Field(
         default=(1920, 1080), description="Resolution of the media clip (width, height)"
@@ -116,6 +123,8 @@ class AudioClip(BaseClip):
     clip_type: Literal["audio"] = "audio"
 
     # properties specific to audio clips
+    source: Source = Field(..., description="Reference to the asset or media source for the clip")
+
     audio_properties: AudioProperties = Field(
         default_factory=AudioProperties, description="Audio properties for the audio clip"
     )
