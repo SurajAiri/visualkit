@@ -42,6 +42,7 @@ class BaseClip(BaseModel, ABC):
 # Visual Clip
 
 
+# todo: add keyframes on all these
 class Transform(BaseModel):
     position: Position = Field(default_factory=Position, description="Position of the transform")
     size: Size = Field(default_factory=Size, description="Size of the transform")
@@ -109,6 +110,19 @@ class TextClip(VisualClip):
     style: TextStyle = Field(
         default_factory=TextStyle, description="Typography and styling options for the text clip"
     )
+
+
+# coded visual
+class CompileStatus(str, Enum):
+    PENDING = "pending"
+    COMPILING = "compiling"
+    READY = "ready"
+    FAILED = "failed"
+
+
+class CodedVisualClip(MediaClip):
+    clip_type: Literal["coded_visual"] = "coded_visual"
+    compile_status: CompileStatus = Field(default=CompileStatus.PENDING)
 
 
 # audio clip
