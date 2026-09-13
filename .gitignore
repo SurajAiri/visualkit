@@ -225,3 +225,4 @@ artifact/
 *.wav
 
 ref/
+output/
