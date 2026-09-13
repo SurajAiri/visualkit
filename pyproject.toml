@@ -19,6 +19,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "notebook>=7.6.2",
+    "pyperclip>=1.11.0",
     "ruff>=0.12.1",
 ]
 
