@@ -8,14 +8,14 @@ m1 = MediaClip(
     id="media1",
     start=Time.zero(),
     duration=Time.from_seconds(10),
-    source=Source(source="video.mp4", source_start=Time.zero()),
+    source=Source(source="video.mp4", start=Time.zero()),
 )
 
 m2 = MediaClip(
     id="media2",
     start=Time.zero(),
     duration=Time.from_seconds(10),
-    source=Source(source="video.mp4", source_start=Time.zero()),
+    source=Source(source="video.mp4", start=Time.zero()),
 )
 
 t1 = TextClip(
@@ -28,7 +28,7 @@ a1 = AudioClip(
     id="audio1",
     start=Time.zero(),
     duration=Time.from_seconds(10),
-    source=Source(source="audio.mp3", source_start=Time.zero()),
+    source=Source(source="audio.mp3", start=Time.zero()),
 )
 
 timeline = Timeline(

@@ -1,5 +1,5 @@
 import uuid
-from abc import ABC
+from abc import ABC, abstractmethod
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +20,7 @@ class Source(BaseModel):
     """Represents a media source for a clip."""
 
     source: str = Field(..., description="Reference to the asset or media source for the clip")
-    source_start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
+    start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
 
 
 class BaseClip(BaseModel, ABC):

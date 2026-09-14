@@ -19,12 +19,9 @@ Clip
 │               as a normal MediaClip.
 │
 └── CompoundClip
-    ├── Represents a self-contained composition made up of multiple clips
-    │   arranged on its own internal timeline.
-    │
-    └── RefinedScriptClip
-        └── A specialized CompoundClip containing the refined main-track
-            composition; restricted to root/track-0.
+    └── Represents a self-contained composition made up of multiple clips
+        arranged on its own internal timeline. & has both a audio visual track.
+
 ```
 Clip: timing(source_start_ts, duration), linked_clip_id, asset_reference, key_frame, speed, animation(in, overall, out), start
     - AudioClip: volume, audio_effects
@@ -33,7 +30,7 @@ Clip: timing(source_start_ts, duration), linked_clip_id, asset_reference, key_fr
         - MediaClip: [video, image, gif, etc]: transition
         - CodedVisualClip(MediaClip): code_ref on asset_ref  [rendering step, code -> canvas — a MediaClip subclass]
     - CompoundClip: [a combination of multiple clips, a sort of having secondary timeline for these clips] [templates with changeable parameters for input values, all structured in a single place for ease of use and reusability.]
-    - RefinedScriptClip(CompoundClip): [refined main track] (we have to have a special clip for this.) [it's a compound clip that renders the refined main track to compound clip of refined main track timeline. and this can only be on root/track-0 ]
+    - RefinedScriptClip(CompoundClip): (doesn't exist, ignore this) [refined main track] (we have to have a special clip for this.) [it's a compound clip that renders the refined main track to compound clip of refined main track timeline. and this can only be on root/track-0 ]
 
 Track:
     items: [Clip | Transition]     
