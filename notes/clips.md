@@ -1,7 +1,32 @@
 # Clips
 **Various editing option based on the clip type**
 
-Clip: timing(source_start_ts, duration, track_id), linked_clip_id, asset_reference, key_frame, speed, animation(in, overall, out)
+```md
+Clip
+├── AudioClip
+│   └── Audio content placed on an audio track.
+│
+├── VisualClip
+│   ├── TextClip
+│   │   └── Text content rendered as a visual clip.
+│   │
+│   └── MediaClip
+│       ├── Represents visual media such as video, images, GIFs, etc.
+│       │
+│       └── CodedVisualClip
+│           └── References code that is executed during rendering to
+│               generate a media asset; the resulting output then behaves
+│               as a normal MediaClip.
+│
+└── CompoundClip
+    ├── Represents a self-contained composition made up of multiple clips
+    │   arranged on its own internal timeline.
+    │
+    └── RefinedScriptClip
+        └── A specialized CompoundClip containing the refined main-track
+            composition; restricted to root/track-0.
+```
+Clip: timing(source_start_ts, duration), linked_clip_id, asset_reference, key_frame, speed, animation(in, overall, out), start
     - AudioClip: volume, audio_effects
     - VisualClip: transform(zoom, rotation, position, scale, opacity), chroma_key, masking
         - TextClip: text_value, text_style(font, size, color, weight, etc.), text_animations
@@ -11,8 +36,7 @@ Clip: timing(source_start_ts, duration, track_id), linked_clip_id, asset_referen
     - RefinedScriptClip(CompoundClip): [refined main track] (we have to have a special clip for this.) [it's a compound clip that renders the refined main track to compound clip of refined main track timeline. and this can only be on root/track-0 ]
 
 Track:
-    items: [Clip | Gap | Transition]     # order is the source of truth, position is derived
-    Gap: duration
+    items: [Clip | Transition]     
     Transition: type, duration # requires clip_before/clip_after continuous & touching 
 
 
@@ -27,4 +51,5 @@ Variables:
     -> audio_effects, chroma_key, masking, transition, text_animations, animation(in, overall, out)
 
 
+Skip for now: keyframe system, add-ons, compound clip, refined script clip, transition
 Phase 2: chroma key, masking, transition, text_animations, animation(in, overall, out) 
