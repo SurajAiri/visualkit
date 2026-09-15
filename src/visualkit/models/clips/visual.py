@@ -19,8 +19,6 @@ class Transform(BaseModel):
 class VisualClip(BaseClip):
     """Base Class for all visual clips placed on a track"""
 
-    clip_type: Literal["media", "text", "coded_visual"]
-
     transform: Transform = Field(
         default_factory=Transform, description="Transform properties of the visual clip"
     )

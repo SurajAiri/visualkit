@@ -1,5 +1,6 @@
 import uuid
 from abc import ABC, abstractmethod
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,15 +24,19 @@ class Source(BaseModel):
     start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
 
 
+# todo: separate input variable properties
 class BaseClip(BaseModel, ABC):
     """Base Class for all media & visual clips placed on a track"""
 
     id: str = Field(
         default_factory=lambda: f"clip_{uuid.uuid4().hex[:8]}", description="Unique identifier for the clip"
     )
-    clip_type: str
 
     # changable properties
     start: Time = Field(default=Time.zero(), description="Start time of the clip on the timeline")
     duration: Time = Field(default=Time.zero(), description="Duration of the clip")
     speed: float = Field(default=1.0, ge=0.0, description="Playback speed of the clip")
+
+    @property
+    @abstractmethod
+    def clip_type(self) -> str: ...

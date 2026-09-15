@@ -5,15 +5,16 @@ from pydantic import Field
 from .audio import AudioClip, AudioProperties
 from .base import BaseClip, Position, Size, Source
 from .coded_visual import CodedVisualClip, CompileStatus
+from .compound import CompoundAudioClip, CompoundClip
 from .media import MediaClip
 from .text import TextClip, TextStyle
 from .visual import Transform, VisualClip
 
 VisualContent = Annotated[
-    Union[MediaClip, CodedVisualClip, TextClip],
+    Union[MediaClip, CodedVisualClip, TextClip, CompoundClip],
     Field(discriminator="clip_type"),
 ]
-AudioContent = Annotated[AudioClip, Field(discriminator="clip_type")]
+AudioContent = Annotated[Union[AudioClip, CompoundAudioClip], Field(discriminator="clip_type")]  # noqa: F821
 Clip = Annotated[Union[AudioClip, TextClip, MediaClip, CodedVisualClip], Field(discriminator="clip_type")]
 
 __all__ = [
@@ -30,6 +31,8 @@ __all__ = [
     "TextStyle",
     "Transform",
     "VisualClip",
+    "CompoundClip",
+    "CompoundAudioClip",
     "Clip",
     "VisualContent",
     "AudioContent",

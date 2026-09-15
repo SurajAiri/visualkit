@@ -1254,6 +1254,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytest-async"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ff/b6/c15344fd2894fe93f15ce0f503d25afc2506ebe01a3c3ea52044169d510c/pytest_async-0.1.1.tar.gz", hash = "sha256:0d6ffd3ebac2f3aa47d606dbae1984750268a89dc8caf4a908ba61c60299cdfd", size = 5339, upload-time = "2020-02-26T17:31:21.138Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/4f/bdd43dd0838c2b0c0487a8de0480a30fb797e49abc4c8c68aca2912fd636/pytest_async-0.1.1-py3-none-any.whl", hash = "sha256:11cc41eef82592951d56c2bb9b0e6ab21b2f0f00663e78d95694a80d965be930", size = 2778, upload-time = "2020-02-26T17:31:18.587Z" },
+]
+
+[[package]]
 name = "python-dateutil"
 version = "2.9.0.post0"
 source = { registry = "https://pypi.org/simple" }
@@ -1722,6 +1731,7 @@ dependencies = [
 dev = [
     { name = "notebook" },
     { name = "pyperclip" },
+    { name = "pytest-async" },
     { name = "ruff" },
 ]
 
@@ -1732,6 +1742,7 @@ requires-dist = [{ name = "pydantic", specifier = ">=2.13.5" }]
 dev = [
     { name = "notebook", specifier = ">=7.6.2" },
     { name = "pyperclip", specifier = ">=1.11.0" },
+    { name = "pytest-async", specifier = ">=0.1.1" },
     { name = "ruff", specifier = ">=0.12.1" },
 ]
 

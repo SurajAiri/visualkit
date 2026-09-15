@@ -16,7 +16,10 @@ class CompileStatus(str, Enum):
 
 
 class CodedVisualClip(MediaClip):
-    clip_type: Literal["coded_visual"] = "coded_visual"
+    @property
+    def clip_type(self) -> str:
+        return "coded_visual"
+
     compile_status: CompileStatus = Field(default=CompileStatus.PENDING)
 
     # The media source for the coded visual clip.
@@ -42,7 +45,6 @@ class CodedVisualClip(MediaClip):
         if self.media_source is None:
             raise ValueError("Media source is not set. Compilation might have failed.")
         return MediaClip(
-            clip_type="media",
             source=Source(source=self.media_source, start=self.source.start),
             fps=self.fps,
             resolution=self.resolution,

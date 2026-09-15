@@ -1,5 +1,5 @@
 # audio clip
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -14,7 +14,9 @@ class AudioProperties(BaseModel):
 class AudioClip(BaseClip):
     """Represents an audio clip placed on a track"""
 
-    clip_type: Literal["audio"] = "audio"
+    @property
+    def clip_type(self) -> str:
+        return "audio"
 
     # properties specific to audio clips
     source: Source = Field(..., description="Reference to the asset or media source for the clip")
@@ -22,3 +24,7 @@ class AudioClip(BaseClip):
     audio_properties: AudioProperties = Field(
         default_factory=AudioProperties, description="Audio properties for the audio clip"
     )
+
+    linked_clip_id: str | None = Field(
+        default=None, description="Optional ID of a linked clip (e.g., for split clips or related media)"
+    )  # todo: add validation to ensure linked clip exists in the same track or project, and that it is of a compatible type (e.g., media clip)
