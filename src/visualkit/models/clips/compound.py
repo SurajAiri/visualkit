@@ -13,6 +13,8 @@ from typing import Any
 
 from pydantic import Field
 
+from visualkit.utils.time import Time
+
 from .base import BaseClip
 
 

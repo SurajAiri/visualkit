@@ -1,8 +1,14 @@
+from enum import Enum
 import uuid
 
 from pydantic import BaseModel, Field
 
 from visualkit.models.clips import AudioClip, AudioContent, Clip, VisualContent
+
+
+class TrackAddMode(str, Enum):
+    OVERLAP = "overlap"  # just add the clip to the list, even if it overlaps with existing clips
+    RIPPLE = "ripple"  # shift existing clips to the right to make room for the new clip, preventing overlap
 
 
 class Track(BaseModel):
@@ -17,12 +23,11 @@ class Track(BaseModel):
     audio: list[AudioContent] = Field(default_factory=list)
 
     # todo: all these need to be re-written these are all wrong, incomplete or mis-interpreted
-    def add_clip(self, clip: Clip) -> None:
+    def add_clip(self, clip: Clip, mode: TrackAddMode = TrackAddMode.OVERLAP) -> None:
         """Route a clip into the correct list based on its concrete type."""
-        if isinstance(clip, AudioClip):
-            self.audio.append(clip)
-        else:
-            self.visual.append(clip)
+        # get start
+        # todo: if overlap, then add compound and visual in visual and audio in audio, if ripple then shift all clips to the right
+        # for compound clips, on validation there should be a check that automatically add compound audio clip associated to the compound clip if it is not already present in the audio track and if it is only present in audio track remove that (but this is mostly in validation phase)
 
     def remove_clip(self, clip_id: str) -> bool:
         for lst in (self.visual, self.audio):
