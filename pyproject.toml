@@ -4,17 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "visualkit"
-version = "0.0.1"
+version = "2.0.1"
 description = "An Video Editor engine library."
 readme = "README.md"
-authors = [
-    { name = "Suraj Airi", email = "surajairi.ml@gmail.com" }
-]
+authors = [{ name = "Suraj Airi", email = "surajairi.ml@gmail.com" }]
 license = { text = "MIT license" }
 requires-python = ">=3.12"
-dependencies = [
-    "pydantic>=2.13.5",
-]
+dependencies = ["pydantic>=2.13.5"]
 
 [dependency-groups]
 dev = [
@@ -30,4 +26,3 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
-

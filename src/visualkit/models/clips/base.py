@@ -33,10 +33,6 @@ class BaseClip(BaseModel, ABC):
     )
 
     # changable properties
-    start: Time = Field(default=Time.zero(), description="Start time of the clip on the timeline")
+    timeline_start: Time = Field(default=Time.zero(), description="Start time of the clip on the timeline")
     duration: Time = Field(default=Time.zero(), description="Duration of the clip")
     speed: float = Field(default=1.0, ge=0.0, description="Playback speed of the clip")
-
-    @property
-    @abstractmethod
-    def clip_type(self) -> str: ...

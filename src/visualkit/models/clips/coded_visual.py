@@ -16,16 +16,16 @@ class CompileStatus(str, Enum):
 
 
 class CodedVisualClip(MediaClip):
-    @property
-    def clip_type(self) -> str:
-        return "coded_visual"
+    clip_type: Literal["coded_visual"] = Field(
+        default="coded_visual", frozen=True, description="Type of the clip (coded visual)"
+    )
 
     compile_status: CompileStatus = Field(default=CompileStatus.PENDING)
 
     # The media source for the coded visual clip.
     # This will be updated after the code is compiled.
     media_source: str | None = Field(
-        None, description="Reference to the media source for the coded visual clip"
+        default=None, description="Reference to the media source for the coded visual clip"
     )  # better this is deterministic, so that we can cache the compiled media source based on the code and other properties
 
     async def _compile(self) -> None:

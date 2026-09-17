@@ -1,5 +1,6 @@
-from enum import Enum
+from typing import override
 import uuid
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
@@ -23,11 +24,11 @@ class Track(BaseModel):
     audio: list[AudioContent] = Field(default_factory=list)
 
     # todo: all these need to be re-written these are all wrong, incomplete or mis-interpreted
-    def add_clip(self, clip: Clip, mode: TrackAddMode = TrackAddMode.OVERLAP) -> None:
+    def add_clip(self, *clip: Clip, mode: TrackAddMode = TrackAddMode.OVERLAP) -> None:
         """Route a clip into the correct list based on its concrete type."""
         # get start
         # todo: if overlap, then add compound and visual in visual and audio in audio, if ripple then shift all clips to the right
-        # for compound clips, on validation there should be a check that automatically add compound audio clip associated to the compound clip if it is not already present in the audio track and if it is only present in audio track remove that (but this is mostly in validation phase)
+        # for adding compound clip, add associated compound audio clip in audio list.
 
     def remove_clip(self, clip_id: str) -> bool:
         for lst in (self.visual, self.audio):
@@ -57,6 +58,7 @@ class Track(BaseModel):
 
     def validate_clips(self) -> list[str]:
         """Enforces the non-overlapping-by-default invariant this class claims."""
+        # for compound clips, on validation there should be a check that automatically add compound audio clip associated to the compound clip if it is not already present in the audio track and if it is only present in audio track remove that (but this is mostly in validation phase)
         return self._overlap_errors(self.visual) + self._overlap_errors(self.audio)
 
 

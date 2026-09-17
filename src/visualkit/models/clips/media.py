@@ -9,9 +9,7 @@ from .visual import VisualClip
 class MediaClip(VisualClip):
     """Represents a media clip (video or image) placed on a track"""
 
-    @property
-    def clip_type(self) -> str:
-        return "media"
+    clip_type: Literal["media"] = Field(default="media", frozen=True, description="Type of the clip (media)")
 
     # properties specific to media clips
     source: Source = Field(..., description="Reference to the asset or media source for the clip")

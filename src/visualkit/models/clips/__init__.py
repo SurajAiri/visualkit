@@ -15,7 +15,7 @@ VisualContent = Annotated[
     Field(discriminator="clip_type"),
 ]
 AudioContent = Annotated[Union[AudioClip, CompoundAudioClip], Field(discriminator="clip_type")]  # noqa: F821
-Clip = Annotated[Union[AudioClip, TextClip, MediaClip, CodedVisualClip], Field(discriminator="clip_type")]
+# Clip = Annotated[Union[AudioClip, TextClip, MediaClip, CodedVisualClip], Field(discriminator="clip_type")]
 
 __all__ = [
     "AudioClip",
@@ -33,7 +33,7 @@ __all__ = [
     "VisualClip",
     "CompoundClip",
     "CompoundAudioClip",
-    "Clip",
+    # "Clip",
     "VisualContent",
     "AudioContent",
 ]

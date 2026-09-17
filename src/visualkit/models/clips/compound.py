@@ -9,7 +9,7 @@ A CompoundClip can be:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -25,9 +25,9 @@ class CompoundAudioClip(BaseClip):
     Linked to the visual CompoundClip via compound_clip_id and linked_clip_id.
     """
 
-    @property
-    def clip_type(self) -> str:
-        return "compound_audio"
+    clip_type: Literal["compound_audio"] = Field(
+        default="compound_audio", frozen=True, description="Type of the clip (compound audio)"
+    )
 
     # ID of the parent CompoundClip on the visual lane
     compound_clip_id: str = Field(
@@ -55,9 +55,9 @@ class CompoundClip(BaseClip):
     any mix of clip types.
     """
 
-    @property
-    def clip_type(self) -> str:
-        return "compound"
+    clip_type: Literal["compound"] = Field(
+        default="compound", frozen=True, description="Type of the clip (compound)"
+    )
 
     # todo: have to think how to have timeline here
     # The internal timeline this compound clip encapsulates.
@@ -81,7 +81,7 @@ class CompoundClip(BaseClip):
 
         audio_clip = CompoundAudioClip(
             id=f"ca-{self.id}",
-            start=self.start,
+            timeline_start=self.timeline_start,
             duration=self.duration,
             speed=self.speed,
             compound_clip_id=self.id,

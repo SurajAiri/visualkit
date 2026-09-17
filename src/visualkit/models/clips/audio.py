@@ -14,9 +14,7 @@ class AudioProperties(BaseModel):
 class AudioClip(BaseClip):
     """Represents an audio clip placed on a track"""
 
-    @property
-    def clip_type(self) -> str:
-        return "audio"
+    clip_type: Literal["audio"] = Field(default="audio", frozen=True, description="Type of the clip (audio)")
 
     # properties specific to audio clips
     source: Source = Field(..., description="Reference to the asset or media source for the clip")

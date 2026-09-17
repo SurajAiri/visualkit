@@ -31,9 +31,7 @@ class TextStyle(BaseModel):
 class TextClip(VisualClip):
     """Represents a text clip placed on a track"""
 
-    @property
-    def clip_type(self) -> str:
-        return "text"
+    clip_type: Literal["text"] = Field(default="text", frozen=True, description="Type of the clip (text)")
 
     # properties specific to text clips
     text: str = Field(
