@@ -82,9 +82,7 @@ class CodedVisualClip(MediaClip):
                         normalized[k] = Variable(name=k, value=v, default=v)
                 data["variables"] = normalized
             elif isinstance(raw_vars, list):
-                data["variables"] = {
-                    (v.name if isinstance(v, Variable) else v["name"]): v for v in raw_vars
-                }
+                data["variables"] = {(v.name if isinstance(v, Variable) else v["name"]): v for v in raw_vars}
         return data
 
     def define_variable(
@@ -133,12 +131,7 @@ class CodedVisualClip(MediaClip):
 
     def get_missing_required_variables(self) -> list[str]:
         """Return variable names that are marked as required but have no value or default."""
-        return [
-            name
-            for name, var in self.variables.items()
-            if var.required and var.resolve_value() is None
-        ]
-
+        return [name for name, var in self.variables.items() if var.required and var.resolve_value() is None]
 
     def load_manifest(self, path: str | Path | None = None) -> None:
         """Load metadata/manifest from the source path and update aspect ratio, canvas size, and variables."""
@@ -177,8 +170,12 @@ class CodedVisualClip(MediaClip):
         if self.media_source is None:
             raise ValueError("Media source is not set. Compilation might have failed.")
         return MediaClip(
+            id=self.id,
+            timeline_start=self.timeline_start,
+            duration=self.duration,
+            speed=self.speed,
             source=Source(source=self.media_source, start=self.source.start),
             fps=self.fps,
-            resolution=self.resolution,
+            resolution=(int(self.canvas_size.width), int(self.canvas_size.height)),
             transform=self.transform,
         )

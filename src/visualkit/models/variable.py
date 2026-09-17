@@ -47,7 +47,6 @@ class Variable(BaseModel):
         """Returns the assigned value if present, else fallback to default."""
         return self.value if self.value is not None else self.default
 
-
     @model_validator(mode="after")
     def _validate_types(self) -> "Variable":
         target_val = self.value if self.value is not None else self.default

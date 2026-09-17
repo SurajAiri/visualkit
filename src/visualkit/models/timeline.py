@@ -267,6 +267,8 @@ class Timeline(BaseModel):
         project_name: str = "VisualKit Project",
         sequence_name: str = "VisualKit Sequence",
         render_video: bool = False,
+        asset_resolver: Any = None,
+        **kwargs: Any,
     ) -> Any:
         """Export timeline to DaVinci Resolve-compatible XML (FCP 7 XML / XMEML or FCPXML)."""
         from visualkit.exporters.resolve import DaVinciResolveExporter
@@ -276,8 +278,15 @@ class Timeline(BaseModel):
             resolution=resolution,
             project_name=project_name,
             sequence_name=sequence_name,
+            asset_resolver=asset_resolver,
         )
-        return exporter.export(self, output_path=output_path, render_video=render_video)
+        return exporter.export(
+            self,
+            output_path=output_path,
+            render_video=render_video,
+            asset_resolver=asset_resolver,
+            **kwargs,
+        )
 
     def export_to_video(
         self,
@@ -286,6 +295,7 @@ class Timeline(BaseModel):
         resolution: tuple[int, int] = (1920, 1080),
         video_codec: str = "libx264",
         audio_codec: str = "aac",
+        asset_resolver: Any = None,
         **kwargs: Any,
     ) -> Any:
         """Render and export the timeline into a standalone video file (MP4/WebM) using FFmpeg."""
@@ -296,9 +306,11 @@ class Timeline(BaseModel):
             resolution=resolution,
             video_codec=video_codec,
             audio_codec=audio_codec,
+            asset_resolver=asset_resolver,
         )
-        return exporter.export(self, output_path=output_path, **kwargs)
-
-
-
-
+        return exporter.export(
+            self,
+            output_path=output_path,
+            asset_resolver=asset_resolver,
+            **kwargs,
+        )

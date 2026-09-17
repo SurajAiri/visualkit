@@ -176,8 +176,47 @@ def test_export_with_compound_and_coded_visual_auto_flattening(tmp_path: Path):
     assert any("coded_stat" in name for name in clip_names)
 
     # Start frame is 2s * 30fps = 60 frames
-    coded_item = next(
-        elem for elem in root.findall(".//clipitem") if "coded_stat" in elem.find("name").text
-    )
+    coded_item = next(elem for elem in root.findall(".//clipitem") if "coded_stat" in elem.find("name").text)
     assert coded_item.find("start").text == "60"
     assert coded_item.find("end").text == "150"
+
+
+def test_export_with_asset_resolver(tmp_path: Path, mock_video_file: Path, mock_audio_file: Path):
+    from visualkit.engine.asset_resolver import DictAssetResolver
+
+    resolver = DictAssetResolver(
+        {
+            "asset://b_roll": str(mock_video_file),
+            "asset://voiceover": str(mock_audio_file),
+        }
+    )
+
+    timeline = Timeline()
+    timeline.add_clip(
+        MediaClip(
+            id="clip1",
+            source=Source(source="asset://b_roll"),
+            timeline_start=Time.from_seconds(0),
+            duration=Time.from_seconds(4),
+        )
+    )
+    timeline.add_clip(
+        AudioClip(
+            id="audio1",
+            source=Source(source="asset://voiceover"),
+            timeline_start=Time.from_seconds(0),
+            duration=Time.from_seconds(4),
+        )
+    )
+
+    output_xml = tmp_path / "asset_resolved_project.xml"
+    timeline.export_to_resolve(output_xml, fps=30.0, asset_resolver=resolver)
+
+    assert output_xml.exists()
+    tree = ET.parse(output_xml)
+    root = tree.getroot()
+
+    pathurls = [elem.text for elem in root.findall(".//clipitem/file/pathurl")]
+    assert any("sample_video.mp4" in url for url in pathurls)
+    assert any("sample_audio.wav" in url for url in pathurls)
+    assert not any("asset://" in url for url in pathurls)

@@ -20,11 +20,24 @@ class FFmpegVideoExporter(BaseExporter):
         resolution: tuple[int, int] = (1920, 1080),
         video_codec: str = "libx264",
         audio_codec: str = "aac",
+        asset_resolver: Any = None,
     ):
         self.fps = fps
         self.resolution = resolution
         self.video_codec = video_codec
         self.audio_codec = audio_codec
+        self.asset_resolver = asset_resolver
+
+    def _resolve_source(self, source_str: str) -> str:
+        """Resolve an asset reference using asset_resolver if configured."""
+        if not source_str:
+            return source_str
+        if self.asset_resolver:
+            if hasattr(self.asset_resolver, "resolve"):
+                return self.asset_resolver.resolve(source_str)
+            if callable(self.asset_resolver):
+                return self.asset_resolver(source_str)
+        return source_str
 
     def export(
         self,
@@ -42,7 +55,11 @@ class FFmpegVideoExporter(BaseExporter):
         if not shutil.which("ffmpeg"):
             raise RuntimeError("FFmpeg executable not found on system PATH.")
 
+        if "asset_resolver" in kwargs and kwargs["asset_resolver"] is not None:
+            self.asset_resolver = kwargs["asset_resolver"]
+
         # Flatten timeline and compile coded visuals into real video assets
+
         flattened = timeline.flatten(render_video=True)
         total_duration = max(flattened.duration.seconds, 1.0)
         width, height = self.resolution
@@ -80,7 +97,8 @@ class FFmpegVideoExporter(BaseExporter):
         for track_idx, clip in video_items:
             source_file: Path | None = None
             if isinstance(clip, MediaClip):
-                source_file = Path(clip.source.source)
+                resolved_src = self._resolve_source(clip.source.source)
+                source_file = Path(resolved_src)
             elif isinstance(clip, TextClip):
                 # Render text clip to a styled SVG/PNG for FFmpeg input
                 source_file = self._render_text_to_image(clip, width, height)
@@ -118,7 +136,8 @@ class FFmpegVideoExporter(BaseExporter):
         # Process Audio Inputs
         audio_labels: list[str] = []
         for a_clip in audio_items:
-            source_file = Path(a_clip.source.source)
+            resolved_a_src = self._resolve_source(a_clip.source.source)
+            source_file = Path(resolved_a_src)
             if not source_file.exists():
                 continue
 
@@ -128,13 +147,9 @@ class FFmpegVideoExporter(BaseExporter):
 
             a_label = f"[a_{input_index}]"
             if start_ms > 0:
-                filter_complex.append(
-                    f"[{input_index}:a]volume={vol},adelay={start_ms}|{start_ms}{a_label}"
-                )
+                filter_complex.append(f"[{input_index}:a]volume={vol},adelay={start_ms}|{start_ms}{a_label}")
             else:
-                filter_complex.append(
-                    f"[{input_index}:a]volume={vol}{a_label}"
-                )
+                filter_complex.append(f"[{input_index}:a]volume={vol}{a_label}")
             audio_labels.append(a_label)
             input_index += 1
 
@@ -155,7 +170,11 @@ class FFmpegVideoExporter(BaseExporter):
         if filter_complex:
             cmd.extend(["-filter_complex", ";".join(filter_complex)])
 
-        cmd.extend(["-map", current_video_label])
+        if current_video_label == "[0:v]":
+            cmd.extend(["-map", "0:v"])
+        else:
+            cmd.extend(["-map", current_video_label])
+
         if has_audio:
             cmd.extend(["-map", final_audio_label, "-c:a", self.audio_codec])
         else:
@@ -190,23 +209,24 @@ class FFmpegVideoExporter(BaseExporter):
         font_size = getattr(clip.style, "font_size", 64) if hasattr(clip, "style") else 64
         font_color = getattr(clip.style, "color", "#ffffff") if hasattr(clip, "style") else "#ffffff"
 
-        html_content = f"""<!DOCTYPE html>
+        html_content = (
+            f"""<!DOCTYPE html>
 <html>
-<body style="margin:0;padding:0;background:transparent;width:100vw;height:100vh;""" \
-                       f"""display:flex;align-items:center;justify-content:center;">
-    <h1 style="margin:0;font-family:system-ui,-apple-system,sans-serif;""" \
-                       f"""font-size:{font_size}px;color:{font_color};text-align:center;">
+<body style="margin:0;padding:0;background:transparent;width:100vw;height:100vh;"""
+            f"""display:flex;align-items:center;justify-content:center;">
+    <h1 style="margin:0;font-family:system-ui,-apple-system,sans-serif;"""
+            f"""font-size:{font_size}px;color:{font_color};text-align:center;">
         {clip.text}
     </h1>
 </body>
 </html>"""
+        )
 
         cache_dir = Path(".visualkit_cache/rendered_text").resolve()
         cache_dir.mkdir(parents=True, exist_ok=True)
         html_file = cache_dir / f"{clip.id}.html"
         out_png = cache_dir / f"{clip.id}.png"
         html_file.write_text(html_content, encoding="utf-8")
-
 
         chrome_bin = CodedVisualCompiler._find_chrome_executable()
         if chrome_bin:
@@ -227,5 +247,3 @@ class FFmpegVideoExporter(BaseExporter):
             return out_png
 
         return html_file
-
-

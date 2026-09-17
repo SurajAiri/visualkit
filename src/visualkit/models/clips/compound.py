@@ -164,7 +164,6 @@ class CompoundClip(BaseClip):
                     missing.append(p.name)
         return missing
 
-
     def get_child_variables(self) -> dict[str, dict[str, Variable]]:
         """Collect and return variables from all inner clips, grouped by clip ID.
 

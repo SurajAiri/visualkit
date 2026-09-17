@@ -148,3 +148,40 @@ def test_coded_visual_render_to_video_and_resolve_export(tmp_path: Path):
 
     # Verify DaVinci Resolve points to an actual .mp4 video rather than .html!
     assert "render.mp4" in xml_text
+
+
+def test_video_export_with_asset_resolver(tmp_path: Path, generate_test_media):
+    from visualkit.engine.asset_resolver import DictAssetResolver
+
+    video_file, audio_file = generate_test_media
+
+    resolver = DictAssetResolver(
+        {
+            "asset://b_roll": str(video_file),
+            "asset://voiceover": str(audio_file),
+        }
+    )
+
+    timeline = Timeline()
+    timeline.add_clip(
+        MediaClip(
+            id="clip1",
+            source=Source(source="asset://b_roll"),
+            timeline_start=Time.from_seconds(0),
+            duration=Time.from_seconds(2),
+        )
+    )
+    timeline.add_clip(
+        AudioClip(
+            id="audio1",
+            source=Source(source="asset://voiceover"),
+            timeline_start=Time.from_seconds(0),
+            duration=Time.from_seconds(2),
+        )
+    )
+
+    output_mp4 = tmp_path / "resolved_output.mp4"
+    timeline.export_to_video(output_mp4, fps=30.0, asset_resolver=resolver)
+
+    assert output_mp4.exists()
+    assert output_mp4.stat().st_size > 0

@@ -269,4 +269,3 @@ class CodedVisualCompiler:
         except Exception as e:
             clip.compile_status = CompileStatus.FAILED
             raise RuntimeError(f"Failed to compile CodedVisualClip '{clip.id}': {e}") from e
-

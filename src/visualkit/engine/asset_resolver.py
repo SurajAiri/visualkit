@@ -1,18 +1,25 @@
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from typing import Union
 
 
 class AssetResolver:
-    """Resolves asset references to actual media sources, handling caching and retrieval of assets.
-    <br> Used by Export layer to resolve asset references to actual media sources, handling caching and retrieval of assets."""  # noqa: E501
+    """Resolves asset references to actual media sources.
 
-    def __init__(self, resolver: Callable[[str], str]):
-        """
-        Initializes the AssetResolver with a resolver function.
+    Handles caching and retrieval of assets for the export and rendering layers.
+    """
+
+    def __init__(self, resolver: Union[Callable[[str], str], Mapping[str, str]]):
+        """Initializes the AssetResolver with a resolver function or a dictionary mapping.
 
         Args:
-            resolver (callable): A function that takes an asset reference (str) and returns the actual media source (str).
-        """  # noqa: E501
-        self.resolver = resolver
+            resolver: A callable returning the actual media source path for an asset reference,
+                      or a Mapping (dict) of asset references to file paths.
+        """
+
+        if isinstance(resolver, Mapping):
+            self.resolver = lambda ref: resolver.get(ref, ref)
+        else:
+            self.resolver = resolver
         self.cache: dict[str, str] = {}
 
     def resolve(self, asset_reference: str) -> str:
@@ -32,6 +39,16 @@ class AssetResolver:
         self.cache[asset_reference] = media_source
         return media_source
 
+    def __call__(self, asset_reference: str) -> str:
+        return self.resolve(asset_reference)
+
     def clear_cache(self) -> None:
         """Clears the cached asset resolutions."""
         self.cache.clear()
+
+
+class DictAssetResolver(AssetResolver):
+    """Convenience AssetResolver initialized from a dictionary mapping."""
+
+    def __init__(self, mapping: Mapping[str, str]):
+        super().__init__(mapping)

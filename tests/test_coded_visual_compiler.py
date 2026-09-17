@@ -214,3 +214,21 @@ def test_compiler_compile_end_to_end(tmp_path: Path, temp_templates_dir: Path):
     assert "Revenue 2026" in compiled_content
     assert "#10b981" in compiled_content
     assert '<base href="' in compiled_content
+
+
+@pytest.mark.asyncio
+async def test_coded_visual_clip_async_resolve(temp_templates_dir: Path):
+    bundle_dir = temp_templates_dir / "chart_bundle"
+    clip = CodedVisualClip(
+        id="cv_test_resolve",
+        source=str(bundle_dir),
+        timeline_start=Time.from_seconds(3),
+        duration=Time.from_seconds(7),
+        speed=1.5,
+    )
+    resolved_media = await clip.resolve()
+    assert resolved_media.id == "cv_test_resolve"
+    assert resolved_media.timeline_start.seconds == 3.0
+    assert resolved_media.duration.seconds == 7.0
+    assert resolved_media.speed == 1.5
+    assert resolved_media.source.source.endswith("index.html")

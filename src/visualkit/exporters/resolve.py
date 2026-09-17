@@ -20,11 +20,24 @@ class DaVinciResolveExporter(BaseExporter):
         resolution: tuple[int, int] = (1920, 1080),
         project_name: str = "VisualKit Project",
         sequence_name: str = "VisualKit Sequence",
+        asset_resolver: Any = None,
     ):
         self.fps = fps
         self.resolution = resolution
         self.project_name = project_name
         self.sequence_name = sequence_name
+        self.asset_resolver = asset_resolver
+
+    def _resolve_source(self, source_str: str) -> str:
+        """Resolve an asset reference using asset_resolver if configured."""
+        if not source_str:
+            return source_str
+        if self.asset_resolver:
+            if hasattr(self.asset_resolver, "resolve"):
+                return self.asset_resolver.resolve(source_str)
+            if callable(self.asset_resolver):
+                return self.asset_resolver(source_str)
+        return source_str
 
     def export(self, timeline: Timeline, output_path: str | Path, **kwargs) -> Path:
         """Export timeline to DaVinci Resolve format.
@@ -33,6 +46,9 @@ class DaVinciResolveExporter(BaseExporter):
         """
         path = Path(output_path).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
+
+        if "asset_resolver" in kwargs and kwargs["asset_resolver"] is not None:
+            self.asset_resolver = kwargs["asset_resolver"]
 
         # Ensure timeline is flattened and resolved
         render_video = kwargs.get("render_video", False)
@@ -134,6 +150,7 @@ class DaVinciResolveExporter(BaseExporter):
                     else:
                         source_path = str(source_path or "unknown")
 
+                source_path = self._resolve_source(source_path)
                 ET.SubElement(file_elem, "name").text = Path(source_path).name if source_path else name
 
                 # Convert to file URI if local path exists
@@ -188,6 +205,7 @@ class DaVinciResolveExporter(BaseExporter):
                 file_counter += 1
 
                 source_path = clip.source.source if hasattr(clip, "source") else "unknown.wav"
+                source_path = self._resolve_source(source_path)
                 ET.SubElement(file_elem, "name").text = Path(source_path).name
                 p = Path(source_path)
                 path_url = p.resolve().as_uri() if p.exists() else f"file://{source_path}"
@@ -253,6 +271,7 @@ class DaVinciResolveExporter(BaseExporter):
                     source_path = getattr(clip, "source", None)
                     source_path = source_path.source if hasattr(source_path, "source") else str(source_path)
 
+                source_path = self._resolve_source(source_path)
                 p = Path(source_path)
                 src_uri = p.resolve().as_uri() if p.exists() else f"file://{source_path}"
 

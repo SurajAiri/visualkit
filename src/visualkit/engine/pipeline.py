@@ -50,7 +50,6 @@ class TimelinePipeline:
                     )
         return timeline
 
-
     def flatten(self, timeline: Timeline) -> Timeline:
         """Expand all CompoundClips and resolve CodedVisualClips into a concrete Timeline.
 
@@ -109,7 +108,6 @@ class TimelinePipeline:
         self.resolve_variables(timeline)
         self.compile_coded_visuals(timeline, force=force_compile, render_video=render_video)
         return self.flatten(timeline)
-
 
     def _flatten_compound_clip(
         self,
@@ -174,7 +172,6 @@ class TimelinePipeline:
                         expanded_audio.audio_properties.volume * audio_volume_mult
                     )
                     target_timeline.audio_tracks[dest_a_idx].add_clip(expanded_audio)
-
 
     @staticmethod
     def _coded_visual_to_media(clip: CodedVisualClip) -> MediaClip:
