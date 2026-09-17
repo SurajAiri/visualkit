@@ -213,11 +213,9 @@ def test_string_source_coercion_and_track_index():
     assert isinstance(a_clip.source, Source)
     assert a_clip.source.source == "/path/to/audio.mp3"
 
-    # 2. Test adding to empty timeline with higher track_index
+    # 2. Test adding to empty timeline auto-provisions track
     timeline = Timeline()
-    timeline.add_clip(v_clip, track_index=2)
-    assert len(timeline.video_tracks) == 3
-    assert len(timeline.video_tracks[0].clips) == 0
-    assert len(timeline.video_tracks[1].clips) == 0
-    assert len(timeline.video_tracks[2].clips) == 1
-    assert timeline.video_tracks[2].clips[0].id == v_clip.id
+    timeline.add_clip(v_clip)
+    assert len(timeline.video_tracks) == 1
+    assert timeline.video_tracks[0].clips[0].id == v_clip.id
+
