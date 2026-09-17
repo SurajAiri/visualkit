@@ -1,5 +1,5 @@
 from visualkit.engine import AssetResolver, TimelinePipeline
-from visualkit.exporters import BaseExporter, DaVinciResolveExporter
+from visualkit.exporters import BaseExporter, DaVinciResolveExporter, FFmpegVideoExporter
 from visualkit.models import (
     AudioClip,
     AudioContent,
@@ -54,4 +54,5 @@ __all__ = [
     "AssetResolver",
     "BaseExporter",
     "DaVinciResolveExporter",
+    "FFmpegVideoExporter",
 ]

@@ -123,6 +123,23 @@ class CodedVisualClip(MediaClip):
         """Resolve all variables to their assigned values or defaults."""
         return {name: var.resolve_value() for name, var in self.variables.items()}
 
+    def get_set_variables(self) -> dict[str, Any]:
+        """Return names and current assigned values of all explicitly set variables."""
+        return {name: var.value for name, var in self.variables.items() if var.is_set}
+
+    def get_unset_variables(self) -> dict[str, Variable]:
+        """Return all variables that have not been explicitly assigned a value."""
+        return {name: var for name, var in self.variables.items() if not var.is_set}
+
+    def get_missing_required_variables(self) -> list[str]:
+        """Return variable names that are marked as required but have no value or default."""
+        return [
+            name
+            for name, var in self.variables.items()
+            if var.required and var.resolve_value() is None
+        ]
+
+
     def load_manifest(self, path: str | Path | None = None) -> None:
         """Load metadata/manifest from the source path and update aspect ratio, canvas size, and variables."""
         from visualkit.coded_visual.project import load_coded_visual

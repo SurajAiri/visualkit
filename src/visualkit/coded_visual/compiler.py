@@ -153,15 +153,120 @@ class CodedVisualCompiler:
 
         return target_html, cache_key
 
-    def compile(self, clip: CodedVisualClip, force: bool = False) -> str:
-        """Compile the clip by preparing the bundle and updating clip state."""
+    @staticmethod
+    def _find_chrome_executable() -> str | None:
+        """Locate Google Chrome or Chromium executable on the system."""
+        import shutil
+
+        # Common macOS paths
+        mac_paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+        for p in mac_paths:
+            if Path(p).exists():
+                return p
+
+        # Search in PATH (Linux / Windows / customized environments)
+        for bin_name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            found = shutil.which(bin_name)
+            if found:
+                return found
+        return None
+
+    def render_to_video(
+        self,
+        clip: CodedVisualClip,
+        output_path: str | Path | None = None,
+        fps: float = 30.0,
+        force: bool = False,
+    ) -> Path:
+        """Render the prepared HTML bundle into an actual MP4 video file using headless Chrome and FFmpeg."""
+        import subprocess
+
+        target_html, cache_key = self.prepare_bundle(clip)
+        bundle_dir = target_html.parent
+        out_file = Path(output_path) if output_path else (bundle_dir / "render.mp4")
+
+        # Reuse cached video if available
+        if out_file.exists() and not force:
+            clip.media_source = str(out_file)
+            clip.compile_status = CompileStatus.READY
+            return out_file
+
+        chrome_bin = self._find_chrome_executable()
+        if not chrome_bin:
+            raise RuntimeError(
+                "Cannot render coded visual to video: Google Chrome or Chromium not found on system."
+            )
+
+        duration = clip.duration.seconds if clip.duration and clip.duration.seconds > 0 else 5.0
+        width = int(clip.canvas_size.width)
+        height = int(clip.canvas_size.height)
+
+        # 1. Capture snapshot with Chrome headless
+        screenshot_file = bundle_dir / "snapshot.png"
+        chrome_cmd = [
+            chrome_bin,
+            "--headless=new",
+            f"--screenshot={screenshot_file}",
+            f"--window-size={width},{height}",
+            target_html.as_uri(),
+        ]
+        subprocess.run(
+            chrome_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # 2. Encode to MP4 with FFmpeg
+        ff_cmd = [
+            "ffmpeg",
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(screenshot_file),
+            "-c:v",
+            "libx264",
+            "-t",
+            str(duration),
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(fps),
+            str(out_file),
+        ]
+        subprocess.run(
+            ff_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        clip.media_source = str(out_file)
+        clip.compile_status = CompileStatus.READY
+        return out_file
+
+    def compile(
+        self,
+        clip: CodedVisualClip,
+        force: bool = False,
+        render_video: bool = False,
+    ) -> str:
+        """Compile the clip by preparing the bundle and optionally rendering to video."""
         clip.compile_status = CompileStatus.COMPILING
         try:
+            if render_video:
+                out_path = self.render_to_video(clip, force=force)
+                return str(out_path)
+
             target_html, cache_key = self.prepare_bundle(clip)
-            # The compiled media source points to the prepared HTML bundle entrypoint
             clip.media_source = str(target_html)
             clip.compile_status = CompileStatus.READY
             return str(target_html)
         except Exception as e:
             clip.compile_status = CompileStatus.FAILED
             raise RuntimeError(f"Failed to compile CodedVisualClip '{clip.id}': {e}") from e
+

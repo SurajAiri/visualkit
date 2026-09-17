@@ -41,6 +41,9 @@ class ExposedParameter(BaseModel):
         description="Guidance for AI agents explaining what this parameter controls and format constraints",
     )
     default: Any = Field(default=None, description="Default fallback value")
+    required: bool = Field(
+        default=False, description="Whether this parameter must be provided before rendering"
+    )
 
 
 class CompoundAudioClip(BaseClip):
@@ -126,6 +129,7 @@ class CompoundClip(BaseClip):
         label: str | None = None,
         description: str | None = None,
         default: Any = None,
+        required: bool = False,
     ) -> ExposedParameter:
         """Register an exposed parameter mapping for template reuse."""
         param = ExposedParameter(
@@ -135,11 +139,31 @@ class CompoundClip(BaseClip):
             label=label,
             description=description,
             default=default,
+            required=required,
         )
         # Replace if already exists with same name
         self.exposed_parameters = [p for p in self.exposed_parameters if p.name != name]
         self.exposed_parameters.append(param)
         return param
+
+    def get_set_parameters(self) -> dict[str, Any]:
+        """Return all parameter names and values that have been set on this compound clip."""
+        return dict(self.parameters)
+
+    def get_unset_parameters(self) -> list[ExposedParameter]:
+        """Return exposed parameter definitions that have not been assigned a value."""
+        return [p for p in self.exposed_parameters if p.name not in self.parameters]
+
+    def get_missing_required_parameters(self) -> list[str]:
+        """Return names of required exposed parameters that have neither an assigned value nor a default."""
+        missing = []
+        for p in self.exposed_parameters:
+            if p.required:
+                val = self.parameters.get(p.name, p.default)
+                if val is None:
+                    missing.append(p.name)
+        return missing
+
 
     def get_child_variables(self) -> dict[str, dict[str, Variable]]:
         """Collect and return variables from all inner clips, grouped by clip ID.

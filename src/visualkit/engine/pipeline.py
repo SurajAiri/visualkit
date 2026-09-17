@@ -30,16 +30,26 @@ class TimelinePipeline:
                         self.resolve_variables(clip.inner_timeline)
         return timeline
 
-    def compile_coded_visuals(self, timeline: Timeline, force: bool = False) -> Timeline:
+    def compile_coded_visuals(
+        self,
+        timeline: Timeline,
+        force: bool = False,
+        render_video: bool = False,
+    ) -> Timeline:
         """Find and compile all CodedVisualClip instances across all tracks and inner timelines."""
         for track in timeline.video_tracks:
             for clip in track.clips:
                 if isinstance(clip, CodedVisualClip):
                     if force or clip.compile_status != CompileStatus.READY or not clip.media_source:
-                        self.compiler.compile(clip, force=force)
+                        self.compiler.compile(clip, force=force, render_video=render_video)
                 elif isinstance(clip, CompoundClip) and clip.inner_timeline:
-                    self.compile_coded_visuals(clip.inner_timeline, force=force)
+                    self.compile_coded_visuals(
+                        clip.inner_timeline,
+                        force=force,
+                        render_video=render_video,
+                    )
         return timeline
+
 
     def flatten(self, timeline: Timeline) -> Timeline:
         """Expand all CompoundClips and resolve CodedVisualClips into a concrete Timeline.
@@ -89,11 +99,17 @@ class TimelinePipeline:
 
         return flattened
 
-    def process(self, timeline: Timeline, force_compile: bool = False) -> Timeline:
+    def process(
+        self,
+        timeline: Timeline,
+        force_compile: bool = False,
+        render_video: bool = False,
+    ) -> Timeline:
         """Run the full end-to-end pipeline: resolve variables -> compile coded visuals -> flatten."""
         self.resolve_variables(timeline)
-        self.compile_coded_visuals(timeline, force=force_compile)
+        self.compile_coded_visuals(timeline, force=force_compile, render_video=render_video)
         return self.flatten(timeline)
+
 
     def _flatten_compound_clip(
         self,

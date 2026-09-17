@@ -35,7 +35,8 @@ class DaVinciResolveExporter(BaseExporter):
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Ensure timeline is flattened and resolved
-        flattened = timeline.flatten()
+        render_video = kwargs.get("render_video", False)
+        flattened = timeline.flatten(render_video=render_video)
 
         if path.suffix.lower() == ".fcpxml":
             xml_content = self.generate_fcpxml(flattened)

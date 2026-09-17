@@ -13,6 +13,7 @@ from visualkit.models.clips import (
     CompoundClip,
     VisualContent,
 )
+from visualkit.utils.time import Time
 
 
 class InsertMode(str, Enum):
@@ -234,14 +235,29 @@ class Timeline(BaseModel):
 
         return errors
 
-    def flatten(self, force_compile: bool = False) -> Timeline:
+    @property
+    def duration(self) -> Time:
+        """Returns the total duration of the timeline, computed from the latest clip endpoint."""
+        latest = Time.zero()
+        for track in self.all_tracks:
+            for clip in track.clips:
+                clip_end = clip.timeline_start + clip.duration
+                if clip_end > latest:
+                    latest = clip_end
+        return latest
+
+    def flatten(self, force_compile: bool = False, render_video: bool = False) -> Timeline:
         """Resolve variables, compile coded visuals, and flatten all compound clips
 
         into a concrete Timeline.
         """
         from visualkit.engine.pipeline import TimelinePipeline
 
-        return TimelinePipeline().process(self, force_compile=force_compile)
+        return TimelinePipeline().process(
+            self,
+            force_compile=force_compile,
+            render_video=render_video,
+        )
 
     def export_to_resolve(
         self,
@@ -250,6 +266,7 @@ class Timeline(BaseModel):
         resolution: tuple[int, int] = (1920, 1080),
         project_name: str = "VisualKit Project",
         sequence_name: str = "VisualKit Sequence",
+        render_video: bool = False,
     ) -> Any:
         """Export timeline to DaVinci Resolve-compatible XML (FCP 7 XML / XMEML or FCPXML)."""
         from visualkit.exporters.resolve import DaVinciResolveExporter
@@ -260,6 +277,28 @@ class Timeline(BaseModel):
             project_name=project_name,
             sequence_name=sequence_name,
         )
-        return exporter.export(self, output_path=output_path)
+        return exporter.export(self, output_path=output_path, render_video=render_video)
+
+    def export_to_video(
+        self,
+        output_path: Any,
+        fps: float = 30.0,
+        resolution: tuple[int, int] = (1920, 1080),
+        video_codec: str = "libx264",
+        audio_codec: str = "aac",
+        **kwargs: Any,
+    ) -> Any:
+        """Render and export the timeline into a standalone video file (MP4/WebM) using FFmpeg."""
+        from visualkit.exporters.video import FFmpegVideoExporter
+
+        exporter = FFmpegVideoExporter(
+            fps=fps,
+            resolution=resolution,
+            video_codec=video_codec,
+            audio_codec=audio_codec,
+        )
+        return exporter.export(self, output_path=output_path, **kwargs)
+
+
 
 

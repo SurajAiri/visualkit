@@ -31,15 +31,22 @@ class Variable(BaseModel):
     type: VariableType = Field(default=VariableType.STRING, description="Type of the variable")
     value: Any = Field(default=None, description="Current assigned value")
     default: Any = Field(default=None, description="Default fallback value")
+    required: bool = Field(default=False, description="Whether this variable must be set before rendering")
     label: str | None = Field(default=None, description="Human-readable label for UI")
     description: str | None = Field(
         default=None,
         description="Guidance for AI agents describing what this variable controls and constraints",
     )
 
+    @property
+    def is_set(self) -> bool:
+        """Returns True if this variable has been explicitly assigned a non-None value."""
+        return self.value is not None
+
     def resolve_value(self) -> Any:
         """Returns the assigned value if present, else fallback to default."""
         return self.value if self.value is not None else self.default
+
 
     @model_validator(mode="after")
     def _validate_types(self) -> "Variable":
