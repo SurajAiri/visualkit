@@ -233,3 +233,13 @@ class Timeline(BaseModel):
                 seen_clip_ids.add(clip.id)
 
         return errors
+
+    def flatten(self, force_compile: bool = False) -> Timeline:
+        """Resolve variables, compile coded visuals, and flatten all compound clips
+
+        into a concrete Timeline.
+        """
+        from visualkit.engine.pipeline import TimelinePipeline
+
+        return TimelinePipeline().process(self, force_compile=force_compile)
+

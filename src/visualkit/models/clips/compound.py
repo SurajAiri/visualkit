@@ -193,7 +193,9 @@ class CompoundClip(BaseClip):
     @staticmethod
     def _apply_val_to_clip(clip: Any, var_name: str, value: Any) -> None:
         """Helper to inject a value into a clip variable or attribute."""
-        if hasattr(clip, "set_variable"):
+        if hasattr(clip, "set_parameter"):
+            clip.set_parameter(var_name, value)
+        elif hasattr(clip, "set_variable"):
             clip.set_variable(var_name, value)
         elif hasattr(clip, "variables") and isinstance(clip.variables, dict):
             if var_name in clip.variables:
