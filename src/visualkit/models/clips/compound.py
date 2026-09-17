@@ -11,14 +11,36 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
+from visualkit.models.variable import Variable
 from visualkit.utils.time import Time
 
 from .base import BaseClip
 
 if TYPE_CHECKING:
     from visualkit.models.timeline import Timeline
+
+
+class ExposedParameter(BaseModel):
+    """Maps a top-level compound clip parameter to a specific inner clip's variable or property.
+
+    Enables compound clips to act as reusable templates with AI-friendly descriptions
+    and human-friendly labels.
+    """
+
+    name: str = Field(..., description="External parameter name exposed to caller/agent")
+    target_clip_id: str = Field(..., description="ID of the target clip inside inner_timeline")
+    target_variable: str = Field(
+        ...,
+        description="Property or variable name on the target clip (e.g. 'text', 'headline', 'bg_color')",
+    )
+    label: str | None = Field(default=None, description="Human-friendly label for UI")
+    description: str | None = Field(
+        default=None,
+        description="Guidance for AI agents explaining what this parameter controls and format constraints",
+    )
+    default: Any = Field(default=None, description="Default fallback value")
 
 
 class CompoundAudioClip(BaseClip):
@@ -63,8 +85,6 @@ class CompoundClip(BaseClip):
     )
 
     # The internal timeline this compound clip encapsulates.
-    # Uses a forward reference to avoid circular imports; Timeline is
-    # imported at model_rebuild() time (see visualkit/models/__init__.py).
     inner_timeline: Timeline | None = Field(
         default=None,
         description="Internal timeline containing the compound clip's tracks and clips",
@@ -75,17 +95,19 @@ class CompoundClip(BaseClip):
         description="Optional ID of a linked companion clip (e.g. CompoundAudioClip)",
     )
 
-    # todo: some way to have children clips' input variables
-    # Template parameters — named values that can be swapped when reusing
-    # this compound clip as a template.
+    # Template parameter mappings and configured values
+    exposed_parameters: list[ExposedParameter] = Field(
+        default_factory=list,
+        description="Definitions of parameters exposed to external callers/agents",
+    )
+
     parameters: dict[str, Any] = Field(
         default_factory=dict,
-        description="Named input parameters for template-based compound clips",
+        description="Configured values for exposed template parameters (e.g. {'title': 'Intro'})",
     )
 
     def create_audio_companion(self) -> Any:
         """Create a linked CompoundAudioClip to represent this compound on the audio lane."""
-
         audio_clip = CompoundAudioClip(
             id=f"ca-{self.id}",
             timeline_start=self.timeline_start,
@@ -95,3 +117,88 @@ class CompoundClip(BaseClip):
         )
         self.linked_clip_id = audio_clip.id
         return audio_clip
+
+    def expose_parameter(
+        self,
+        name: str,
+        target_clip_id: str,
+        target_variable: str,
+        label: str | None = None,
+        description: str | None = None,
+        default: Any = None,
+    ) -> ExposedParameter:
+        """Register an exposed parameter mapping for template reuse."""
+        param = ExposedParameter(
+            name=name,
+            target_clip_id=target_clip_id,
+            target_variable=target_variable,
+            label=label,
+            description=description,
+            default=default,
+        )
+        # Replace if already exists with same name
+        self.exposed_parameters = [p for p in self.exposed_parameters if p.name != name]
+        self.exposed_parameters.append(param)
+        return param
+
+    def get_child_variables(self) -> dict[str, dict[str, Variable]]:
+        """Collect and return variables from all inner clips, grouped by clip ID.
+
+        Allows inspecting variables cleanly separated per child clip.
+        """
+        grouped: dict[str, dict[str, Variable]] = {}
+        if not self.inner_timeline:
+            return grouped
+
+        for track in self.inner_timeline.all_tracks:
+            for clip in track.clips:
+                clip_vars: dict[str, Variable] = {}
+                if hasattr(clip, "variables") and isinstance(clip.variables, dict):
+                    clip_vars = clip.variables
+                elif hasattr(clip, "get_child_variables"):
+                    # Nested compound clip
+                    nested = clip.get_child_variables()
+                    for nested_id, n_vars in nested.items():
+                        grouped[f"{clip.id}.{nested_id}"] = n_vars
+                if clip_vars:
+                    grouped[clip.id] = clip_vars
+        return grouped
+
+    def set_parameter(self, name: str, value: Any) -> None:
+        """Set an exposed parameter value and immediately apply it to child clips."""
+        self.parameters[name] = value
+        self.apply_parameters()
+
+    def apply_parameters(self) -> None:
+        """Propagate current parameters down to child clips in the inner timeline."""
+        if not self.inner_timeline:
+            return
+
+        # 1. Apply mapped parameters
+        mapping_by_name = {p.name: p for p in self.exposed_parameters}
+        for name, value in self.parameters.items():
+            if name in mapping_by_name:
+                mapping = mapping_by_name[name]
+                _, clip = self.inner_timeline.get_clip(mapping.target_clip_id)
+                if clip is not None:
+                    self._apply_val_to_clip(clip, mapping.target_variable, value)
+
+            # 2. Support direct namespaced parameters: 'clip_id.property'
+            elif "." in name:
+                target_clip_id, var_name = name.split(".", 1)
+                _, clip = self.inner_timeline.get_clip(target_clip_id)
+                if clip is not None:
+                    self._apply_val_to_clip(clip, var_name, value)
+
+    @staticmethod
+    def _apply_val_to_clip(clip: Any, var_name: str, value: Any) -> None:
+        """Helper to inject a value into a clip variable or attribute."""
+        if hasattr(clip, "set_variable"):
+            clip.set_variable(var_name, value)
+        elif hasattr(clip, "variables") and isinstance(clip.variables, dict):
+            if var_name in clip.variables:
+                clip.variables[var_name].value = value
+            else:
+                clip.variables[var_name] = Variable(name=var_name, value=value, default=value)
+        elif hasattr(clip, var_name):
+            setattr(clip, var_name, value)

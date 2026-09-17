@@ -6,6 +6,7 @@ from visualkit.models.clips import (
     CodedVisualClip,
     CompoundAudioClip,
     CompoundClip,
+    ExposedParameter,
     MediaClip,
     Position,
     Size,
@@ -23,6 +24,10 @@ from visualkit.models.timeline import (
     Track,
     TrackKind,
     VideoTrack,
+)
+from visualkit.models.variable import (
+    Variable,
+    VariableType,
 )
 
 # Rebuild models so Pydantic resolves 'Timeline' in CompoundClip
@@ -55,4 +60,7 @@ __all__ = [
     "TrackKind",
     "Timeline",
     "InsertMode",
+    "Variable",
+    "VariableType",
+    "ExposedParameter",
 ]
