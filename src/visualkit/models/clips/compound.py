@@ -9,13 +9,16 @@ A CompoundClip can be:
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
 from visualkit.utils.time import Time
 
 from .base import BaseClip
+
+if TYPE_CHECKING:
+    from visualkit.models.timeline import Timeline
 
 
 class CompoundAudioClip(BaseClip):
@@ -59,13 +62,17 @@ class CompoundClip(BaseClip):
         default="compound", frozen=True, description="Type of the clip (compound)"
     )
 
-    # todo: have to think how to have timeline here
     # The internal timeline this compound clip encapsulates.
     # Uses a forward reference to avoid circular imports; Timeline is
-    # imported at model_rebuild() time (see clips/__init__.py).
-    inner_timeline: Any = Field(
+    # imported at model_rebuild() time (see visualkit/models/__init__.py).
+    inner_timeline: Timeline | None = Field(
         default=None,
         description="Internal timeline containing the compound clip's tracks and clips",
+    )
+
+    linked_clip_id: str | None = Field(
+        default=None,
+        description="Optional ID of a linked companion clip (e.g. CompoundAudioClip)",
     )
 
     # todo: some way to have children clips' input variables

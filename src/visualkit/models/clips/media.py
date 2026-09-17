@@ -20,4 +20,4 @@ class MediaClip(VisualClip):
 
     linked_clip_id: str | None = Field(
         default=None, description="Optional ID of a linked clip (e.g., for split clips or related media)"
-    )  # todo: add validation to ensure linked clip exists in the same track or project, and that it is of a compatible type (e.g., media clip)
+    )  # todo: add validation to ensure linked clip exists in the same track or project, and that it is of a compatible type (e.g., media clip) # noqa: E501

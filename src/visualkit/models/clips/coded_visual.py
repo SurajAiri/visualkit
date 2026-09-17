@@ -26,7 +26,7 @@ class CodedVisualClip(MediaClip):
     # This will be updated after the code is compiled.
     media_source: str | None = Field(
         default=None, description="Reference to the media source for the coded visual clip"
-    )  # better this is deterministic, so that we can cache the compiled media source based on the code and other properties
+    )  # better this is deterministic, so that we can cache the compiled media source based on the code and other properties # noqa: E501
 
     async def _compile(self) -> None:
         """Compile the code for the coded visual clip."""
