@@ -16,12 +16,8 @@ from visualkit.utils.time import Time
 print("=== 1. Coded Visual Clip with Canvas and AI Variable Descriptions ===")
 infographic = CodedVisualClip(
     id="chart_clip",
-    code="""
-    <div style="width: 100%; height: 100%; background: {{ bg_color }};">
-        <h1>{{ title }}</h1>
-        <div class="stat">{{ metric_val }}</div>
-    </div>
-    """,
+    source="templates/chart.html",
+    aspect_ratio="16:9",
     canvas_size=Size(width=1920, height=1080),
     auto_scale=True,
     variables={

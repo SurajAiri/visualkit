@@ -4,6 +4,7 @@ from visualkit.models.clips import (
     BaseClip,
     Clip,
     CodedVisualClip,
+    CompileStatus,
     CompoundAudioClip,
     CompoundClip,
     ExposedParameter,

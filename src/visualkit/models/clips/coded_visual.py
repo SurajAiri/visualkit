@@ -1,4 +1,5 @@
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
@@ -19,27 +20,19 @@ class CompileStatus(str, Enum):
 class CodedVisualClip(MediaClip):
     """Represents an HTML/CSS/JS or code-based animated visual or infographic clip.
 
-    Can be defined via an inline code string, a single .html file, or a full project directory bundle.
-    Supports variables with labels and AI descriptions for template reusability.
+    References an external HTML file or a project directory bundle via source.source,
+    preventing bloated timeline metadata. Preserves designed aspect ratio and canvas dimensions.
     """
 
     clip_type: Literal["coded_visual"] = Field(
         default="coded_visual", frozen=True, description="Type of the clip (coded visual)"
     )
 
-    # Optional inline code if not loading from an external file/folder
-    code: str | None = Field(
-        default=None,
-        description="Inline HTML/CSS/JS code content. If provided, source defaults to inline://",
+    # Design dimensions and aspect ratio from metadata
+    aspect_ratio: str = Field(
+        default="16:9",
+        description="Aspect ratio defined in code metadata (e.g. '16:9', '9:16', '1:1')",
     )
-
-    # Project directory if bundle-based (contains index.html, assets/, manifest.json)
-    project_path: str | None = Field(
-        default=None,
-        description="Path to bundle directory if loading as a multi-asset project folder",
-    )
-
-    # Canvas dimensions and responsive scaling
     canvas_size: Size = Field(
         default_factory=lambda: Size(width=1920, height=1080),
         description="Design canvas dimensions (width and height) for the infographic",
@@ -67,14 +60,11 @@ class CodedVisualClip(MediaClip):
     @classmethod
     def _prepare_source_and_vars(cls, data: Any) -> Any:
         if isinstance(data, dict):
-            # If code or project_path is provided without source, default source
-            if "source" not in data:
-                if "project_path" in data and data["project_path"]:
-                    data["source"] = Source(source=data["project_path"])
-                elif "code" in data and data["code"]:
-                    data["source"] = Source(source="inline://coded_visual")
-                else:
-                    data["source"] = Source(source="unspecified")
+            # Allow passing source as a plain string path
+            if "source" in data and isinstance(data["source"], str):
+                data["source"] = Source(source=data["source"])
+            elif "source" not in data:
+                data["source"] = Source(source="unspecified")
 
             # Allow passing raw dict of variables: {"title": "Hello", "count": 10}
             # or {"title": Variable(...)} or {"title": {"type": "string", "value": "..."}}
@@ -89,11 +79,9 @@ class CodedVisualClip(MediaClip):
                             v = {**v, "name": k}
                         normalized[k] = v
                     else:
-                        # Raw primitive value
                         normalized[k] = Variable(name=k, value=v, default=v)
                 data["variables"] = normalized
             elif isinstance(raw_vars, list):
-                # Allow passing list of Variable objects
                 data["variables"] = {
                     (v.name if isinstance(v, Variable) else v["name"]): v for v in raw_vars
                 }
@@ -135,10 +123,36 @@ class CodedVisualClip(MediaClip):
         """Resolve all variables to their assigned values or defaults."""
         return {name: var.resolve_value() for name, var in self.variables.items()}
 
+    def load_manifest(self, path: str | Path | None = None) -> None:
+        """Load metadata/manifest from the source path and update aspect ratio, canvas size, and variables."""
+        from visualkit.coded_visual.project import load_coded_visual
+
+        target_path = path or self.source.source
+        if not target_path or target_path == "unspecified":
+            return
+
+        _, manifest, _ = load_coded_visual(target_path)
+        self.aspect_ratio = manifest.aspect_ratio
+        self.canvas_size = manifest.canvas_size
+        if manifest.fps:
+            self.fps = manifest.fps
+
+        # Merge manifest variables as defaults if not already explicitly set
+        for var_name, var in manifest.variables.items():
+            if var_name not in self.variables:
+                self.variables[var_name] = var
+            elif self.variables[var_name].value is None and var.default is not None:
+                self.variables[var_name].default = var.default
+
     async def _compile(self) -> None:
         """Compile the code for the coded visual clip."""
-        # Will be driven by the CodedVisualCompiler
-        pass
+        from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+        if self.compile_status == CompileStatus.READY and self.media_source:
+            return
+
+        compiler = CodedVisualCompiler()
+        compiler.compile(self)
 
     async def resolve(self) -> MediaClip:
         """Resolve the coded visual clip to a media clip."""
