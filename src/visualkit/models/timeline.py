@@ -243,3 +243,23 @@ class Timeline(BaseModel):
 
         return TimelinePipeline().process(self, force_compile=force_compile)
 
+    def export_to_resolve(
+        self,
+        output_path: Any,
+        fps: float = 30.0,
+        resolution: tuple[int, int] = (1920, 1080),
+        project_name: str = "VisualKit Project",
+        sequence_name: str = "VisualKit Sequence",
+    ) -> Any:
+        """Export timeline to DaVinci Resolve-compatible XML (FCP 7 XML / XMEML or FCPXML)."""
+        from visualkit.exporters.resolve import DaVinciResolveExporter
+
+        exporter = DaVinciResolveExporter(
+            fps=fps,
+            resolution=resolution,
+            project_name=project_name,
+            sequence_name=sequence_name,
+        )
+        return exporter.export(self, output_path=output_path)
+
+
