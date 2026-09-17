@@ -157,16 +157,13 @@ class Timeline(BaseModel):
         # handling track index
         if track_index < 0:
             raise ValueError("track_index must be non-negative")
-        if track_index >= len(self.video_tracks):
+        while len(self.video_tracks) <= track_index:
             self.add_video_track()
-            video_track_index = len(self.video_tracks) - 1
-        else:
-            video_track_index = track_index
-        if track_index >= len(self.audio_tracks):
+        video_track_index = track_index
+
+        while len(self.audio_tracks) <= track_index:
             self.add_audio_track()
-            audio_track_index = len(self.audio_tracks) - 1
-        else:
-            audio_track_index = track_index
+        audio_track_index = track_index
 
         for clip in clips:
             if clip.clip_type in ("media", "text", "coded_visual", "compound"):

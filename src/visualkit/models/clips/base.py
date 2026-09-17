@@ -1,8 +1,9 @@
 import uuid
 from abc import ABC, abstractmethod
-from typing import ClassVar, Literal
+from pathlib import Path
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from visualkit.utils.time import Time
 
@@ -22,6 +23,13 @@ class Source(BaseModel):
 
     source: str = Field(..., description="Reference to the asset or media source for the clip")
     start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _validate_source(cls, v: Any, handler: Any) -> Any:
+        if isinstance(v, (str, Path)):
+            return cls(source=str(v))
+        return handler(v)
 
 
 # todo: separate input variable properties

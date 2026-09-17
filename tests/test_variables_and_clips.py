@@ -199,3 +199,25 @@ def test_json_roundtrip_serialization():
     assert len(restored_compound.exposed_parameters) == 1
     assert restored_compound.exposed_parameters[0].name == "card_title"
     assert restored_compound.exposed_parameters[0].description == "Title of the card"
+
+
+def test_string_source_coercion_and_track_index():
+    from visualkit.models import AudioClip, MediaClip, Source, Timeline
+
+    # 1. Test passing string directly to MediaClip and AudioClip
+    v_clip = MediaClip(source="/path/to/video.mp4")
+    assert isinstance(v_clip.source, Source)
+    assert v_clip.source.source == "/path/to/video.mp4"
+
+    a_clip = AudioClip(source="/path/to/audio.mp3")
+    assert isinstance(a_clip.source, Source)
+    assert a_clip.source.source == "/path/to/audio.mp3"
+
+    # 2. Test adding to empty timeline with higher track_index
+    timeline = Timeline()
+    timeline.add_clip(v_clip, track_index=2)
+    assert len(timeline.video_tracks) == 3
+    assert len(timeline.video_tracks[0].clips) == 0
+    assert len(timeline.video_tracks[1].clips) == 0
+    assert len(timeline.video_tracks[2].clips) == 1
+    assert timeline.video_tracks[2].clips[0].id == v_clip.id
