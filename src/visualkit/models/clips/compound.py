@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from visualkit.models.variable import Variable
+from visualkit.utils.base_model import VisualKitModel
 from visualkit.utils.time import Time
 
 from .base import BaseClip
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
     from visualkit.models.timeline import Timeline
 
 
-class ExposedParameter(BaseModel):
+class ExposedParameter(VisualKitModel):
     """Maps a top-level compound clip parameter to a specific inner clip's variable or property.
 
     Enables compound clips to act as reusable templates with AI-friendly descriptions

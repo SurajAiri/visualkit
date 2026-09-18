@@ -1,8 +1,9 @@
-from visualkit.engine import AssetResolver, TimelinePipeline
+from visualkit.engine import AssetResolver, DictAssetResolver, TimelinePipeline
 from visualkit.exporters import BaseExporter, DaVinciResolveExporter, FFmpegVideoExporter
 from visualkit.models import (
     AudioClip,
     AudioContent,
+    AudioTrack,
     BaseClip,
     Clip,
     CodedVisualClip,
@@ -18,9 +19,12 @@ from visualkit.models import (
     TextClip,
     TextStyle,
     Timeline,
+    Track,
+    TrackKind,
     Transform,
     Variable,
     VariableType,
+    VideoTrack,
     VisualClip,
     VisualContent,
 )
@@ -29,6 +33,7 @@ from visualkit.utils.time import Time
 __all__ = [
     "AudioClip",
     "AudioContent",
+    "AudioTrack",
     "BaseClip",
     "Clip",
     "CodedVisualClip",
@@ -44,14 +49,18 @@ __all__ = [
     "TextClip",
     "TextStyle",
     "Timeline",
+    "Track",
+    "TrackKind",
     "Transform",
     "Variable",
     "VariableType",
+    "VideoTrack",
     "VisualClip",
     "VisualContent",
     "Time",
     "TimelinePipeline",
     "AssetResolver",
+    "DictAssetResolver",
     "BaseExporter",
     "DaVinciResolveExporter",
     "FFmpegVideoExporter",

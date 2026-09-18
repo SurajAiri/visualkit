@@ -5,7 +5,7 @@ from abc import ABC
 from enum import Enum
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
 from visualkit.models.clips import (
     AudioContent,
@@ -13,6 +13,8 @@ from visualkit.models.clips import (
     CompoundClip,
     VisualContent,
 )
+from visualkit.utils.base_model import VisualKitModel
+from visualkit.utils.exceptions import InvalidTrackOperationError
 from visualkit.utils.time import Time
 
 
@@ -29,17 +31,41 @@ class TrackKind(str, Enum):
 TClip = TypeVar("TClip", bound=Clip)
 
 
-class Track(BaseModel, Generic[TClip]):
+class Track(VisualKitModel, Generic[TClip]):
     """A single track holding an ordered, non-overlapping-by-default list of clips."""
 
     id: str = Field(default_factory=lambda: f"track_{uuid.uuid4().hex[:8]}")
     clips: list[TClip] = Field(default_factory=list)
 
     def add_clip(self, clip: TClip, mode: InsertMode = InsertMode.OVERLAP) -> None:
-        """Add a clip to this track."""
+        """Add a clip to this track.
+
+        In RIPPLE mode, every existing clip whose span starts at or after the
+        new clip's insertion point is pushed right by the new clip's
+        duration, opening a gap for it. If the insertion point instead falls
+        *inside* an already-existing clip's span, there is no unambiguous way
+        to "make room" without splitting that clip -- which this method does
+        not do -- so an `InvalidTrackOperationError` is raised rather than
+        silently leaving clips overlapping.
+        """
         if mode == InsertMode.RIPPLE:
+            insertion_point = clip.timeline_start
+
+            # Validate first, mutate second: iteration order over self.clips
+            # is incidental, so a clip that would need to raise must be
+            # found before any other clip is shifted -- otherwise a failed
+            # insert could leave the track partially rippled.
             for existing in self.clips:
-                if existing.timeline_start >= clip.timeline_start:
+                existing_end = existing.timeline_start + existing.duration
+                if existing.timeline_start < insertion_point < existing_end:
+                    raise InvalidTrackOperationError(
+                        f"Cannot ripple-insert clip '{clip.id}' at {insertion_point}: it falls "
+                        f"inside existing clip '{existing.id}' (spans {existing.timeline_start} "
+                        f"to {existing_end}). Split or move the existing clip first."
+                    )
+
+            for existing in self.clips:
+                if existing.timeline_start >= insertion_point:
                     existing.timeline_start = existing.timeline_start + clip.duration
 
         self.clips.append(clip)
@@ -88,7 +114,7 @@ class AudioTrack(Track[AudioContent]):
     clips: list[AudioContent] = Field(default_factory=list)
 
 
-class Timeline(BaseModel):
+class Timeline(VisualKitModel):
     """Owns all video and audio tracks."""
 
     video_tracks: list[VideoTrack] = Field(default_factory=list)
@@ -153,20 +179,36 @@ class Timeline(BaseModel):
         track_index: int = 0,
         mode: InsertMode = InsertMode.OVERLAP,
     ) -> None:
-        """Add clips directly to the timeline, automatically routing by clip type."""
-        # handling track index
+        """Add clips directly to the timeline, automatically routing by clip type.
+
+        If `track_index` is beyond the current number of tracks, tracks are
+        created up to and including that index (rather than only ever
+        appending a single new track), so `track_index` always refers to the
+        track the caller asked for.
+        """
+        # handling track index, rather than creating empty tracks for no reason, is better than silently creating empty tracks # noqa: E501
         if track_index < 0:
             raise ValueError("track_index must be non-negative")
-        if track_index >= len(self.video_tracks):
+
+        while len(self.video_tracks) <= track_index:
             self.add_video_track()
-            video_track_index = len(self.video_tracks) - 1
-        else:
-            video_track_index = track_index
-        if track_index >= len(self.audio_tracks):
+        while len(self.audio_tracks) <= track_index:
             self.add_audio_track()
-            audio_track_index = len(self.audio_tracks) - 1
-        else:
-            audio_track_index = track_index
+
+        video_track_index = track_index
+        audio_track_index = track_index
+
+        # # not good to have empty tracks for no reason
+        # if track_index < 0:
+        #     raise ValueError("track_index must be non-negative")
+
+        # while len(self.video_tracks) <= track_index:
+        #     self.add_video_track()
+        # while len(self.audio_tracks) <= track_index:
+        #     self.add_audio_track()
+
+        # video_track_index = track_index
+        # audio_track_index = track_index
 
         for clip in clips:
             if clip.clip_type in ("media", "text", "coded_visual", "compound"):

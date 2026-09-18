@@ -28,17 +28,6 @@ class DaVinciResolveExporter(BaseExporter):
         self.sequence_name = sequence_name
         self.asset_resolver = asset_resolver
 
-    def _resolve_source(self, source_str: str) -> str:
-        """Resolve an asset reference using asset_resolver if configured."""
-        if not source_str:
-            return source_str
-        if self.asset_resolver:
-            if hasattr(self.asset_resolver, "resolve"):
-                return self.asset_resolver.resolve(source_str)
-            if callable(self.asset_resolver):
-                return self.asset_resolver(source_str)
-        return source_str
-
     def export(self, timeline: Timeline, output_path: str | Path, **kwargs) -> Path:
         """Export timeline to DaVinci Resolve format.
 
@@ -153,13 +142,7 @@ class DaVinciResolveExporter(BaseExporter):
                 source_path = self._resolve_source(source_path)
                 ET.SubElement(file_elem, "name").text = Path(source_path).name if source_path else name
 
-                # Convert to file URI if local path exists
-                if source_path and not source_path.startswith(("file://", "generator://")):
-                    p = Path(source_path)
-                    path_url = p.resolve().as_uri() if p.exists() else f"file://{source_path}"
-                else:
-                    path_url = source_path or "file:///unknown"
-
+                path_url = self._resolve_source_uri(source_path) if source_path else "file:///unknown"
                 ET.SubElement(file_elem, "pathurl").text = path_url
 
                 f_rate = ET.SubElement(file_elem, "rate")
@@ -207,9 +190,7 @@ class DaVinciResolveExporter(BaseExporter):
                 source_path = clip.source.source if hasattr(clip, "source") else "unknown.wav"
                 source_path = self._resolve_source(source_path)
                 ET.SubElement(file_elem, "name").text = Path(source_path).name
-                p = Path(source_path)
-                path_url = p.resolve().as_uri() if p.exists() else f"file://{source_path}"
-                ET.SubElement(file_elem, "pathurl").text = path_url
+                ET.SubElement(file_elem, "pathurl").text = self._resolve_source_uri(source_path)
 
                 f_rate = ET.SubElement(file_elem, "rate")
                 ET.SubElement(f_rate, "timebase").text = str(timebase)
@@ -221,7 +202,17 @@ class DaVinciResolveExporter(BaseExporter):
         return parsed.toprettyxml(indent="  ", encoding="utf-8").decode("utf-8")
 
     def generate_fcpxml(self, timeline: Timeline) -> str:
-        """Generate modern Apple FCPXML v1.10 format for DaVinci Resolve."""
+        """Generate Apple FCPXML v1.10 markup for DaVinci Resolve / Final Cut Pro.
+
+        Note: this produces well-formed, schema-shaped FCPXML (assets,
+        format, spine, lane-connected clips), but the exact spine/lane
+        layout used here (every clip as a direct spine child positioned by
+        absolute `offset`, with video on lane 0+ and audio on negative
+        lanes) has not been verified against a real DaVinci Resolve import.
+        If clips land in unexpected positions after import, prefer
+        `generate_xmeml` (FCP7 XML), which is the more established/battle-
+        tested path for DaVinci Resolve specifically.
+        """
         root = ET.Element("fcpxml", version="1.10")
         resources = ET.SubElement(root, "resources")
 
@@ -299,6 +290,49 @@ class DaVinciResolveExporter(BaseExporter):
                 ET.SubElement(
                     clip_elem,
                     "video",
+                    ref=asset_id,
+                    offset="0s",
+                    duration=f"{clip.duration.seconds:.3f}s",
+                )
+
+        # Audio tracks. Unlike generate_xmeml (which has a dedicated
+        # <audio> section under <media>), FCPXML represents every clip --
+        # audio included -- as a spine (or lane-connected) element with an
+        # <asset> resource of its own. Audio tracks are placed on negative
+        # lanes (below the primary video lane 0), which is the conventional
+        # FCPXML way to keep audio out of the video compositing stack while
+        # still preserving each track's relative stacking order.
+        for track_idx, track in enumerate(timeline.audio_tracks):
+            lane_attr = str(-(track_idx + 1))
+            for clip in track.clips:
+                source_path = clip.source.source if hasattr(clip, "source") else "unknown.wav"
+                src_uri = self._resolve_source_uri(self._resolve_source(source_path))
+
+                asset_id = f"r{res_counter}"
+                res_counter += 1
+                ET.SubElement(
+                    resources,
+                    "asset",
+                    id=asset_id,
+                    name=getattr(clip, "id", "audio_clip"),
+                    src=src_uri,
+                    duration=f"{clip.duration.seconds:.3f}s",
+                    hasAudio="1",
+                    audioSources="1",
+                    audioChannels="2",
+                )
+
+                clip_elem = ET.SubElement(
+                    spine,
+                    "clip",
+                    name=getattr(clip, "id", "audio_clip"),
+                    offset=f"{clip.timeline_start.seconds:.3f}s",
+                    duration=f"{clip.duration.seconds:.3f}s",
+                    lane=lane_attr,
+                )
+                ET.SubElement(
+                    clip_elem,
+                    "audio",
                     ref=asset_id,
                     offset="0s",
                     duration=f"{clip.duration.seconds:.3f}s",

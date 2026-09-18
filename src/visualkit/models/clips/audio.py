@@ -1,12 +1,14 @@
 # audio clip
-from typing import ClassVar, Literal
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from visualkit.utils.base_model import VisualKitModel
 
 from .base import BaseClip, Source
 
 
-class AudioProperties(BaseModel):
+class AudioProperties(VisualKitModel):
     volume: float = Field(default=1.0, ge=0.0, le=1.0, description="Volume level (0.0 to 1.0)")
     muted: bool = Field(default=False, description="Whether the audio is muted")
 

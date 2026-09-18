@@ -185,3 +185,82 @@ def test_video_export_with_asset_resolver(tmp_path: Path, generate_test_media):
 
     assert output_mp4.exists()
     assert output_mp4.stat().st_size > 0
+
+
+class TestRenderTextToImageEscaping:
+    """Regression tests for the text-clip-to-HTML rendering step used by
+    FFmpegVideoExporter. These test the generated HTML content directly
+    (by stopping before the Chrome subprocess call) rather than requiring
+    Chrome to be installed in the test environment.
+    """
+
+    @staticmethod
+    def _force_no_chrome(monkeypatch):
+        """Deterministically simulate 'no Chrome installed' regardless of
+        what's actually available in the environment running these tests."""
+        from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+        monkeypatch.setattr(CodedVisualCompiler, "_find_chrome_executable", staticmethod(lambda: None))
+
+    def test_special_characters_are_html_escaped(self, tmp_path: Path, monkeypatch):
+        """Text containing <, >, & must not be interpreted as HTML markup;
+        previously it was injected raw into the page."""
+        self._force_no_chrome(monkeypatch)
+        exporter = FFmpegVideoExporter(cache_dir=tmp_path / "cache")
+        clip = TextClip(id="t1", text='Revenue <up> & Growth "2024"', duration=Time.from_seconds(2))
+
+        # No Chrome available -> should raise a clear RuntimeError rather
+        # than silently returning the .html file. We still inspect the
+        # .html file that was written before the raise, since that's where
+        # the escaping bug lived.
+        with pytest.raises(RuntimeError, match="Chrome"):
+            exporter._render_text_to_image(clip, 1920, 1080)
+
+        html_file = (tmp_path / "cache" / "t1.html").resolve()
+        assert html_file.exists()
+        content = html_file.read_text()
+        assert "<up>" not in content
+        assert "&lt;up&gt;" in content
+        assert "&amp;" in content
+
+    def test_long_text_is_wrapped_rather_than_left_on_one_line(self, tmp_path: Path, monkeypatch):
+        self._force_no_chrome(monkeypatch)
+        exporter = FFmpegVideoExporter(cache_dir=tmp_path / "cache")
+        long_text = " ".join(["word"] * 30)
+        clip = TextClip(id="t2", text=long_text, duration=Time.from_seconds(2))
+
+        with pytest.raises(RuntimeError, match="Chrome"):
+            exporter._render_text_to_image(clip, 1920, 1080)
+
+        content = (tmp_path / "cache" / "t2.html").resolve().read_text()
+        assert "<br>" in content
+
+    def test_missing_chrome_raises_instead_of_returning_html_as_image(self, tmp_path: Path, monkeypatch):
+        """Previously, when Chrome was unavailable, this method returned the
+        intermediate .html file itself, which export() would then hand to
+        ffmpeg as if it were a video/image input -- a broken, non-obvious
+        failure. It must now raise a clear, actionable error instead.
+        """
+        self._force_no_chrome(monkeypatch)
+        exporter = FFmpegVideoExporter(cache_dir=tmp_path / "cache")
+        clip = TextClip(id="t3", text="Hello", duration=Time.from_seconds(2))
+
+        with pytest.raises(RuntimeError) as exc_info:
+            exporter._render_text_to_image(clip, 1920, 1080)
+
+        assert "Chrome" in str(exc_info.value) or "Chromium" in str(exc_info.value)
+
+    def test_cache_dir_is_configurable(self, tmp_path: Path, monkeypatch):
+        """The rendered-text cache directory should be configurable per
+        exporter instance rather than a hardcoded relative path tied to the
+        caller's current working directory."""
+        self._force_no_chrome(monkeypatch)
+        custom_cache = tmp_path / "my_custom_cache"
+        exporter = FFmpegVideoExporter(cache_dir=custom_cache)
+        clip = TextClip(id="t4", text="Hi", duration=Time.from_seconds(2))
+
+        with pytest.raises(RuntimeError, match="Chrome"):
+            exporter._render_text_to_image(clip, 1920, 1080)
+
+        assert (custom_cache / "t4.html").exists()
+

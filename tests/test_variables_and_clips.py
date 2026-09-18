@@ -219,3 +219,20 @@ def test_string_source_coercion_and_track_index():
     assert len(timeline.video_tracks) == 1
     assert timeline.video_tracks[0].clips[0].id == v_clip.id
 
+
+def test_transform_rotation_allows_negative_and_multi_turn_values():
+    """rotation was previously bounded to [0, 360], which rejected valid
+    values like -45 (counter-clockwise) or 720 (two full turns, useful for
+    spin animations). It should accept a generous range around a single
+    turn in either direction rather than clamping to exactly one turn.
+    """
+    from visualkit.models.clips.visual import Transform
+
+    assert Transform(rotation=-45.0).rotation == -45.0
+    assert Transform(rotation=720.0).rotation == 720.0
+    assert Transform(rotation=0.0).rotation == 0.0
+
+    with pytest.raises(Exception):
+        Transform(rotation=99999.0)
+
+

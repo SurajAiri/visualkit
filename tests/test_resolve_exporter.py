@@ -102,7 +102,7 @@ def test_export_xmeml_multitrack(tmp_path: Path, mock_video_file: Path, mock_aud
     assert audio_item.find("end").text == "240"  # 8s * 30fps
 
 
-def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path):
+def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path, mock_audio_file: Path):
     timeline = Timeline()
     v_clip = MediaClip(
         id="hero_clip",
@@ -111,6 +111,17 @@ def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path):
         duration=Time.from_seconds(4),
     )
     timeline.add_clip(v_clip)
+
+    # Regression coverage: FCPXML previously dropped audio entirely (only
+    # video clips were ever emitted), unlike generate_xmeml which always
+    # included it.
+    a_clip = AudioClip(
+        id="narration",
+        source=Source(source=str(mock_audio_file)),
+        timeline_start=Time.from_seconds(0),
+        duration=Time.from_seconds(5),
+    )
+    timeline.add_clip(a_clip, track_index=0)
 
     output_fcpxml = tmp_path / "project.fcpxml"
     exporter = DaVinciResolveExporter(fps=30.0)
@@ -129,14 +140,61 @@ def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path):
     assert resources is not None
     format_elem = resources.find("format")
     assert format_elem.attrib["id"] == "r1"
-    asset_elem = resources.find("asset")
-    assert asset_elem is not None
-    assert asset_elem.attrib["src"].startswith("file://")
+    asset_elems = resources.findall("asset")
+    assert len(asset_elems) == 2
+    for asset_elem in asset_elems:
+        assert asset_elem.attrib["src"].startswith("file://")
 
-    # Check spine
+    # Check spine: video clip present
     clip_elem = root.find(".//spine/clip")
     assert clip_elem is not None
     assert clip_elem.attrib["name"] == "hero_clip"
+
+    # Audio clip must now be present in the spine with its own <audio> ref,
+    # not silently dropped.
+    clip_names = [c.attrib.get("name") for c in root.findall(".//spine/clip")]
+    assert "narration" in clip_names
+    audio_elems = root.findall(".//audio")
+    assert len(audio_elems) == 1
+
+    narration_clip = next(c for c in root.findall(".//spine/clip") if c.attrib.get("name") == "narration")
+    assert narration_clip.find("audio") is not None
+    # Asset referenced by the audio resource is flagged as having audio.
+    ref_id = narration_clip.find("audio").attrib["ref"]
+    referenced_asset = next(a for a in asset_elems if a.attrib["id"] == ref_id)
+    assert referenced_asset.attrib.get("hasAudio") == "1"
+
+
+def test_export_fcpxml_multiple_audio_tracks_get_distinct_lanes(
+    tmp_path: Path, mock_video_file: Path, mock_audio_file: Path
+):
+    timeline = Timeline()
+    timeline.add_clip(
+        AudioClip(
+            id="voiceover",
+            source=Source(source=str(mock_audio_file)),
+            duration=Time.from_seconds(4),
+        ),
+        track_index=0,
+    )
+    timeline.add_clip(
+        AudioClip(
+            id="music_bed",
+            source=Source(source=str(mock_audio_file)),
+            duration=Time.from_seconds(4),
+        ),
+        track_index=1,
+    )
+
+    exporter = DaVinciResolveExporter(fps=30.0)
+    xml_content = exporter.generate_fcpxml(timeline)
+    root = ET.fromstring(xml_content)
+
+    clips_by_name = {c.attrib["name"]: c for c in root.findall(".//spine/clip")}
+    assert clips_by_name["voiceover"].attrib["lane"] != clips_by_name["music_bed"].attrib["lane"]
+    # Both audio lanes should be negative (below the video lane(s)).
+    assert int(clips_by_name["voiceover"].attrib["lane"]) < 0
+    assert int(clips_by_name["music_bed"].attrib["lane"]) < 0
 
 
 def test_export_with_compound_and_coded_visual_auto_flattening(tmp_path: Path):

@@ -3,13 +3,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import Field
 
 from visualkit.models.clips.base import Size
 from visualkit.models.variable import Variable, VariableType
+from visualkit.utils.base_model import VisualKitModel
 
 
-class CodedVisualManifest(BaseModel):
+class CodedVisualManifest(VisualKitModel):
     """Metadata schema defining the design specifications and parameters for a coded visual."""
 
     name: str | None = Field(default=None, description="Display name of the template or infographic")

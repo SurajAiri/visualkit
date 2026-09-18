@@ -58,12 +58,18 @@ class TimelinePipeline:
         """
         flattened = Timeline()
 
-        # 1. Map audio companion volume multipliers if present
+        # 1. Map audio companion volume multipliers, and which audio track
+        # each compound's companion clip sits on, if present. The latter is
+        # what lets sibling compound clips' inner audio land on distinct
+        # audio tracks in the flattened output instead of colliding on
+        # whichever track happens to be their *inner* track 0.
         companion_volumes: dict[str, float] = {}
-        for track in timeline.audio_tracks:
+        companion_track_idx: dict[str, int] = {}
+        for track_idx, track in enumerate(timeline.audio_tracks):
             for clip in track.clips:
                 if isinstance(clip, CompoundAudioClip):
                     companion_volumes[clip.compound_clip_id] = 0.0 if clip.mute else clip.volume
+                    companion_track_idx[clip.compound_clip_id] = track_idx
 
         # 2. Process Video Tracks
         for track_idx, v_track in enumerate(timeline.video_tracks):
@@ -72,10 +78,18 @@ class TimelinePipeline:
 
             for clip in v_track.clips:
                 if isinstance(clip, CompoundClip):
+                    # Prefer the audio track the compound's own companion
+                    # clip lives on (its reserved "seat" on the audio lane);
+                    # fall back to the video track index if no companion was
+                    # ever created (e.g. the compound was constructed and
+                    # added to a track directly, bypassing
+                    # Timeline.add_clip's auto-companion routing).
+                    base_a_track_idx = companion_track_idx.get(clip.id, track_idx)
                     self._flatten_compound_clip(
                         compound=clip,
                         target_timeline=flattened,
                         base_v_track_idx=track_idx,
+                        base_a_track_idx=base_a_track_idx,
                         companion_volumes=companion_volumes,
                     )
                 elif isinstance(clip, CodedVisualClip):
@@ -114,18 +128,34 @@ class TimelinePipeline:
         compound: CompoundClip,
         target_timeline: Timeline,
         base_v_track_idx: int,
+        base_a_track_idx: int,
         companion_volumes: dict[str, float],
         accumulated_offset: Any = None,
         parent_speed: float = 1.0,
     ) -> None:
-        """Recursively expands a CompoundClip onto target_timeline."""
+        """Recursively expands a CompoundClip onto target_timeline.
+
+        `base_v_track_idx` / `base_a_track_idx` are the destination video /
+        audio track offsets reserved for this compound: its inner track N
+        expands onto destination track `base_idx + N`. Without a
+        per-compound audio base, sibling compound clips' inner audio tracks
+        would all collide on destination audio track N regardless of which
+        compound (or which outer video track) they came from.
+        """
         if not compound.inner_timeline:
             return
 
         from visualkit.utils.time import Time
 
         current_offset = accumulated_offset if accumulated_offset is not None else Time.zero()
-        compound_offset = current_offset + compound.timeline_start
+        # compound.timeline_start is this compound's position measured in its
+        # *parent's* local time. If an ancestor compound plays faster than
+        # 1x (parent_speed > 1), that local position is compressed on the
+        # root timeline by the same factor -- e.g. a nested compound sitting
+        # at local t=4s inside a 2x-speed parent actually appears at t=2s of
+        # occupied root-timeline span. Leaf clips get the equivalent
+        # treatment below via effective_speed.
+        compound_offset = current_offset + (compound.timeline_start / parent_speed)
         effective_speed = parent_speed * compound.speed
         audio_volume_mult = companion_volumes.get(compound.id, 1.0)
 
@@ -137,19 +167,40 @@ class TimelinePipeline:
 
             for child_clip in inner_v_track.clips:
                 if isinstance(child_clip, CompoundClip):
-                    # Nested compound clip
+                    # Nested compound clip. Its own companion (if any) lives
+                    # on one of *this* compound's inner audio tracks, so
+                    # resolve its base the same way the top-level call does:
+                    # prefer the audio track its companion sits on within
+                    # compound.inner_timeline, falling back to the nested
+                    # compound's position among its siblings.
+                    nested_base_a_idx = self._companion_audio_track_index(
+                        compound.inner_timeline,
+                        child_clip.id,
+                        default=base_a_track_idx,
+                    )
                     self._flatten_compound_clip(
                         compound=child_clip,
                         target_timeline=target_timeline,
                         base_v_track_idx=dest_v_idx,
+                        base_a_track_idx=nested_base_a_idx,
                         companion_volumes=companion_volumes,
                         accumulated_offset=compound_offset,
                         parent_speed=effective_speed,
                     )
                 else:
                     expanded_clip = deepcopy(child_clip)
-                    # Shift absolute timeline start and adjust speed
-                    expanded_clip.timeline_start = expanded_clip.timeline_start + compound_offset
+                    # Compress the child's local position and duration by
+                    # effective_speed before placing it on the outer
+                    # timeline: a compound played at 2x speed should have
+                    # its 4s of inner content occupy 2s of outer timeline,
+                    # not keep its original spacing with only the leaf
+                    # clip's own `speed` field bumped (which affects
+                    # playback rate but not how much outer timeline the
+                    # clip occupies).
+                    expanded_clip.timeline_start = (
+                        expanded_clip.timeline_start / effective_speed
+                    ) + compound_offset
+                    expanded_clip.duration = expanded_clip.duration / effective_speed
                     expanded_clip.speed = expanded_clip.speed * effective_speed
 
                     if isinstance(expanded_clip, CodedVisualClip):
@@ -159,19 +210,37 @@ class TimelinePipeline:
 
         # Expand inner audio tracks
         for inner_a_idx, inner_a_track in enumerate(compound.inner_timeline.audio_tracks):
-            dest_a_idx = inner_a_idx
+            dest_a_idx = base_a_track_idx + inner_a_idx
             while len(target_timeline.audio_tracks) <= dest_a_idx:
                 target_timeline.add_audio_track()
 
             for child_clip in inner_a_track.clips:
                 if isinstance(child_clip, AudioClip):
                     expanded_audio = deepcopy(child_clip)
-                    expanded_audio.timeline_start = expanded_audio.timeline_start + compound_offset
+                    # Same speed-compression as video children: see comment
+                    # above in the video-track expansion loop.
+                    expanded_audio.timeline_start = (
+                        expanded_audio.timeline_start / effective_speed
+                    ) + compound_offset
+                    expanded_audio.duration = expanded_audio.duration / effective_speed
                     expanded_audio.speed = expanded_audio.speed * effective_speed
                     expanded_audio.audio_properties.volume = (
                         expanded_audio.audio_properties.volume * audio_volume_mult
                     )
                     target_timeline.audio_tracks[dest_a_idx].add_clip(expanded_audio)
+
+    @staticmethod
+    def _companion_audio_track_index(timeline: Timeline, compound_clip_id: str, default: int) -> int:
+        """Find which audio track a compound clip's CompoundAudioClip companion lives on
+        within `timeline`, falling back to `default` if it has no companion there
+        (e.g. it was added to an inner timeline directly rather than through
+        Timeline.add_clip's auto-companion routing).
+        """
+        for track_idx, track in enumerate(timeline.audio_tracks):
+            for clip in track.clips:
+                if isinstance(clip, CompoundAudioClip) and clip.compound_clip_id == compound_clip_id:
+                    return track_idx
+        return default
 
     @staticmethod
     def _coded_visual_to_media(clip: CodedVisualClip) -> MediaClip:

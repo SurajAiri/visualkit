@@ -1,7 +1,9 @@
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
+
+from visualkit.utils.base_model import VisualKitModel
 
 
 class VariableType(str, Enum):
@@ -15,7 +17,7 @@ class VariableType(str, Enum):
     JSON = "json"
 
 
-class Variable(BaseModel):
+class Variable(VisualKitModel):
     """Represents a template or coded visual parameter/variable.
 
     Attributes:

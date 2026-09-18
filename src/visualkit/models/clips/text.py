@@ -1,7 +1,9 @@
 from enum import Enum
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import Field
+
+from visualkit.utils.base_model import VisualKitModel
 
 from .visual import VisualClip
 
@@ -15,7 +17,7 @@ class TextAlignment(str, Enum):
     RIGHT = "right"
 
 
-class TextStyle(BaseModel):
+class TextStyle(VisualKitModel):
     """Typography and styling options for text clips."""
 
     alignment: TextAlignment = Field(default=TextAlignment.CENTER, description="Text alignment")

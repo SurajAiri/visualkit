@@ -1,5 +1,8 @@
+import html
+import logging
 import shutil
 import subprocess
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +12,8 @@ from visualkit.models.clips.media import MediaClip
 from visualkit.models.clips.text import TextClip
 from visualkit.models.timeline import Timeline
 from visualkit.utils.time import Time
+
+logger = logging.getLogger(__name__)
 
 
 class FFmpegVideoExporter(BaseExporter):
@@ -21,23 +26,14 @@ class FFmpegVideoExporter(BaseExporter):
         video_codec: str = "libx264",
         audio_codec: str = "aac",
         asset_resolver: Any = None,
+        cache_dir: str | Path = ".visualkit_cache/rendered_text",
     ):
         self.fps = fps
         self.resolution = resolution
         self.video_codec = video_codec
         self.audio_codec = audio_codec
         self.asset_resolver = asset_resolver
-
-    def _resolve_source(self, source_str: str) -> str:
-        """Resolve an asset reference using asset_resolver if configured."""
-        if not source_str:
-            return source_str
-        if self.asset_resolver:
-            if hasattr(self.asset_resolver, "resolve"):
-                return self.asset_resolver.resolve(source_str)
-            if callable(self.asset_resolver):
-                return self.asset_resolver(source_str)
-        return source_str
+        self.cache_dir = Path(cache_dir)
 
     def export(
         self,
@@ -104,6 +100,11 @@ class FFmpegVideoExporter(BaseExporter):
                 source_file = self._render_text_to_image(clip, width, height)
 
             if not source_file or not source_file.exists():
+                logger.warning(
+                    "Skipping video clip '%s': source file not found (%s).",
+                    clip.id,
+                    source_file,
+                )
                 continue
 
             # Add input
@@ -139,6 +140,11 @@ class FFmpegVideoExporter(BaseExporter):
             resolved_a_src = self._resolve_source(a_clip.source.source)
             source_file = Path(resolved_a_src)
             if not source_file.exists():
+                logger.warning(
+                    "Skipping audio clip '%s': source file not found (%s).",
+                    a_clip.id,
+                    source_file,
+                )
                 continue
 
             cmd.extend(["-i", str(source_file)])
@@ -201,13 +207,27 @@ class FFmpegVideoExporter(BaseExporter):
 
         return out_path
 
-    @staticmethod
-    def _render_text_to_image(clip: TextClip, width: int, height: int) -> Path:
-        """Render a TextClip to a transparent PNG snapshot using Chrome for FFmpeg compositing."""
+    def _render_text_to_image(self, clip: TextClip, width: int, height: int) -> Path:
+        """Render a TextClip to a transparent PNG snapshot using Chrome for FFmpeg compositing.
+
+        Raises RuntimeError if no Chrome/Chromium executable is available,
+        rather than silently returning the intermediate .html file as if it
+        were a usable image (which would previously reach ffmpeg as a
+        broken, unrecognized input).
+        """
         from visualkit.coded_visual.compiler import CodedVisualCompiler
 
         font_size = getattr(clip.style, "font_size", 64) if hasattr(clip, "style") else 64
         font_color = getattr(clip.style, "color", "#ffffff") if hasattr(clip, "style") else "#ffffff"
+
+        # Escape the user-supplied text (and defensively, the color, which
+        # is expected to be a CSS color string but should never be trusted
+        # to not contain markup) so that characters like <, >, & don't
+        # corrupt the layout or get interpreted as HTML. Also soft-wrap
+        # long text so it doesn't silently render off-canvas.
+        wrapped_lines = textwrap.wrap(str(clip.text), width=40) or [str(clip.text)]
+        safe_text = "<br>".join(html.escape(line) for line in wrapped_lines)
+        safe_font_color = html.escape(str(font_color))
 
         html_content = (
             f"""<!DOCTYPE html>
@@ -215,35 +235,41 @@ class FFmpegVideoExporter(BaseExporter):
 <body style="margin:0;padding:0;background:transparent;width:100vw;height:100vh;"""
             f"""display:flex;align-items:center;justify-content:center;">
     <h1 style="margin:0;font-family:system-ui,-apple-system,sans-serif;"""
-            f"""font-size:{font_size}px;color:{font_color};text-align:center;">
-        {clip.text}
+            f"""font-size:{font_size}px;color:{safe_font_color};text-align:center;"""
+            f"""max-width:90vw;white-space:normal;overflow-wrap:break-word;">
+        {safe_text}
     </h1>
 </body>
 </html>"""
         )
 
-        cache_dir = Path(".visualkit_cache/rendered_text").resolve()
+        cache_dir = self.cache_dir.resolve()
         cache_dir.mkdir(parents=True, exist_ok=True)
         html_file = cache_dir / f"{clip.id}.html"
         out_png = cache_dir / f"{clip.id}.png"
         html_file.write_text(html_content, encoding="utf-8")
 
         chrome_bin = CodedVisualCompiler._find_chrome_executable()
-        if chrome_bin:
-            chrome_cmd = [
-                chrome_bin,
-                "--headless=new",
-                f"--screenshot={out_png}",
-                f"--window-size={width},{height}",
-                "--default-background-color=00000000",
-                html_file.as_uri(),
-            ]
-            subprocess.run(
-                chrome_cmd,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+        if not chrome_bin:
+            raise RuntimeError(
+                f"Cannot render TextClip '{clip.id}' to an image: no Google Chrome or "
+                "Chromium executable was found on this system. Text clips require a "
+                "headless-Chrome-capable browser to rasterize; install Chrome/Chromium "
+                "or avoid TextClips when exporting with FFmpegVideoExporter."
             )
-            return out_png
 
-        return html_file
+        chrome_cmd = [
+            chrome_bin,
+            "--headless=new",
+            f"--screenshot={out_png}",
+            f"--window-size={width},{height}",
+            "--default-background-color=00000000",
+            html_file.as_uri(),
+        ]
+        subprocess.run(
+            chrome_cmd,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return out_png
