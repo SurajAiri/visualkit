@@ -259,3 +259,107 @@ drift) and a rotation-bound test in test_variables_and_clips.py.
 Full suite: 48 passed, 2 pre-existing environment-only failures.
 
 ---
+
+## feat: split, trim_in/trim_out, ripple_delete, duplicate_clip, get_clip_at
+
+The schema could already represent a trim or split correctly --
+Source.start plus duration is enough information -- but nothing exercised
+that arithmetic, and it's exactly the kind of thing that's easy to get
+subtly wrong (three fields -- timeline_start, duration, source.start --
+that all have to move together, correctly scaled by speed). Adds the
+missing primitives to Track and Timeline:
+
+1. Track.split_clip(clip_id, at_time) / Timeline.split_clip(...): mutates
+   the original clip into the first half (keeps its id) and appends a new
+   second half. For any clip with a `source` field, the second half's
+   source.start is advanced by delta * speed, not delta -- at speed=2.0,
+   one timeline second consumes two source seconds, so copying the raw
+   offset would export wrong even though it looks right in an editor that
+   doesn't account for speed. Cross-links linked_clip_id both ways for
+   clip types that carry it. Raises InvalidSplitError for CompoundClip
+   (and its CompoundAudioClip companion): splitting one would require
+   deep-copying inner_timeline and re-deriving in/out points for every
+   clip it contains, including any that themselves straddle the split
+   point, which isn't attempted here. If the original clip is a
+   CodedVisualClip that had already compiled, both halves have their
+   compiled media_source cleared and compile_status reset to PENDING --
+   the compiler bakes `duration` into both its cache key and its ffmpeg
+   -t argument, so reusing the pre-split render for either half would
+   silently ship stale output at export time.
+
+2. Track.trim_in / Track.trim_out / Timeline.trim_in / Timeline.trim_out:
+   same speed-scaled source.start math as split for trim_in (trim_out
+   never touches source.start, since shortening or lengthening the tail
+   doesn't change what point in the source the clip starts from). Both
+   directions are supported -- trimming a handle later/shorter or
+   earlier/longer, not just shrinking. trim_in raises
+   InvalidTrackOperationError for CompoundClip: it has no field recording
+   "this much of inner_timeline already consumed," so advancing
+   timeline_start would delay its content rather than skip into it, which
+   is the wrong result for a head trim. trim_out has no such problem and
+   works uniformly across every clip type. Both raise
+   InvalidTrackOperationError if the result would leave a clip with
+   non-positive duration, or (trim_in only) would need source.start below
+   zero. Timeline.trim_out additionally trims a CompoundClip's linked
+   CompoundAudioClip companion to the same absolute new_out, so the two
+   lanes stay in sync.
+
+3. Track.ripple_delete / Timeline.ripple_delete: the exact inverse of
+   add_clip(mode=RIPPLE) -- every clip whose start is at or after the
+   removed clip's end is shifted left by the removed clip's duration.
+   Timeline.ripple_delete also ripple-deletes a CompoundClip's linked
+   CompoundAudioClip companion from its own track, so deleting a compound
+   doesn't leave a dangling orphan on the audio lane with the two lanes
+   now misaligned relative to each other.
+
+4. Track.duplicate_clip / Timeline.duplicate_clip: deep-copies a clip with
+   a fresh id, clearing linked_clip_id (a duplicate is a new, independent
+   clip, not the other half of whatever the original was linked to from a
+   prior split). Defaults to placing the copy immediately after the
+   original so the common case doesn't land on top of it under OVERLAP
+   mode. Timeline.duplicate_clip also duplicates and cross-links a
+   CompoundClip's CompoundAudioClip companion, mirroring how add_clip
+   auto-creates and routes one for a freshly-added CompoundClip.
+
+5. Track.get_clip_at(time) / Timeline.get_clips_at(time): "what's under
+   the playhead" previously required scanning a track's clips by hand,
+   since only ID-based lookup existed. Split into two names on purpose --
+   a single track can have at most one clip active at a given instant,
+   but a timeline composites multiple tracks simultaneously, so the
+   cross-timeline version returns every (track, clip) match rather than
+   just the first.
+
+Also, since validate_clips()/validate_tracks() existed but were never
+wired into any mutating call, so nothing stopped e.g. add_clip(mode=
+OVERLAP) from silently producing an invalid, overlapping track: every new
+method above defaults to validate=True, checking for overlaps *before*
+mutating (mirroring the existing ripple-insert convention of validating
+in a pass separate from mutation, so a rejected call never partially
+applies) and raising the previously-unused TimelineValidationError. Also
+adds an opt-in validate: bool = False parameter to the existing
+Track.add_clip / Timeline.add_clip, so OVERLAP-mode inserts can now ask
+for the same check -- default stays False so no existing call site's
+behavior changes.
+
+Also fixes move_clip_track(clip_id, new_track_id): it previously always
+called add_clip with OVERLAP regardless of what the caller wanted, so
+requesting a rippling move silently fell back to overlap semantics. Now
+takes mode: InsertMode = InsertMode.OVERLAP (plus the same validate
+passthrough) and actually uses it.
+
+slip/slide are intentionally not included -- each touches enough
+additional state (slide in particular affects three clips' worth of
+timing at once) to warrant its own review rather than being folded in
+here.
+
+Adds tests/test_clip_editing.py (54 new tests) covering the speed-scaled
+source math in both directions for split and trim_in, the CompoundClip/
+CompoundAudioClip disallow-or-cascade decisions for every new method, the
+CodedVisualClip stale-compile reset for split/trim_in/trim_out, the
+overlap-rejection-before-mutation guarantee, and the move_clip_track mode
+fix.
+
+Full suite: 101 passed, same 3 pre-existing environment-only failures
+(missing Chrome in this sandbox, unrelated to this change).
+
+---
