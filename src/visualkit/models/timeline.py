@@ -44,6 +44,66 @@ def _speed_fraction(speed: float) -> Fraction:
     return Fraction(speed).limit_denominator(_SPEED_DENOMINATOR_LIMIT)
 
 
+def _remap_compound_inner_ids(compound: CompoundClip) -> None:
+    """Give every clip inside `compound.inner_timeline` a fresh id, and
+    update `exposed_parameters[i].target_clip_id` references to match.
+
+    `model_copy(deep=True)` deep-copies field *values*, but a
+    default_factory-generated `id` is just another field value at this
+    point -- it isn't regenerated on copy, so a duplicated CompoundClip's
+    inner_timeline previously kept the exact same inner clip ids as the
+    original. Two duplicated template instances therefore had inner
+    clips sharing one id, which broke anything keyed by clip id across
+    instances -- e.g. the text-rendering cache in
+    `FFmpegVideoExporter._render_text_to_image`, which uses
+    `clip.id` as the cache filename: both instances would collide on the
+    same cached PNG and one instance's text would silently render as the
+    other's.
+
+    Applied recursively for nested CompoundClips (a template containing
+    another template), since the same collision risk exists at every
+    nesting level.
+    """
+    if not compound.inner_timeline:
+        return
+
+    id_map: dict[str, str] = {}
+    for track in compound.inner_timeline.all_tracks:
+        for clip in track.clips:
+            old_id = clip.id
+            new_id = f"clip_{uuid.uuid4().hex[:8]}"
+            clip.id = new_id
+            id_map[old_id] = new_id
+            if isinstance(clip, CompoundClip):
+                _remap_compound_inner_ids(clip)
+            # A clip's own linked_clip_id (e.g. a CompoundAudioClip's
+            # link back to its CompoundClip, or a split's link between
+            # halves) refers to another clip *within this same
+            # inner_timeline*, so it needs remapping too -- but the
+            # target might not have been visited yet, so this is
+            # resolved in a second pass below once id_map is complete.
+
+    if not id_map:
+        return
+
+    for track in compound.inner_timeline.all_tracks:
+        for clip in track.clips:
+            linked = getattr(clip, "linked_clip_id", None)
+            if linked and linked in id_map:
+                clip.linked_clip_id = id_map[linked]
+            compound_ref = getattr(clip, "compound_clip_id", None)
+            if compound_ref and compound_ref in id_map:
+                clip.compound_clip_id = id_map[compound_ref]
+
+    # Update this compound's own exposed-parameter mappings so
+    # `apply_parameters()` still finds each target clip by its new id --
+    # otherwise `set_parameter()`/exposed defaults would silently stop
+    # reaching any inner clip after a duplication.
+    for param in compound.exposed_parameters:
+        if param.target_clip_id in id_map:
+            param.target_clip_id = id_map[param.target_clip_id]
+
+
 class InsertMode(str, Enum):
     OVERLAP = "overlap"  # Place clip at timeline_start; allow overlap
     RIPPLE = "ripple"  # Shift subsequent clips right to make room
@@ -447,6 +507,9 @@ class Track(VisualKitModel, Generic[TClip]):
         if hasattr(duplicate, "linked_clip_id"):
             duplicate.linked_clip_id = None
         duplicate.timeline_start = target_start
+
+        if isinstance(duplicate, CompoundClip) and duplicate.inner_timeline:
+            _remap_compound_inner_ids(duplicate)
 
         # RIPPLE mode does its own overlap-avoidance (or raises) internally;
         # OVERLAP mode was already checked above when validate=True.

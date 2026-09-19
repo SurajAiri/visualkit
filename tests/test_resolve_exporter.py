@@ -88,11 +88,16 @@ def test_export_xmeml_multitrack(tmp_path: Path, mock_video_file: Path, mock_aud
     assert track0_item.find("end").text == "150"  # 5s * 30fps
     assert track0_item.find("file/pathurl").text.startswith("file://")
 
-    # Verify track 1 clipitem (start 2s = 60 frames)
-    track1_item = v_tracks[1].find("clipitem")
+    # Verify track 1 -- a TextClip exports as a <generatoritem> (Resolve's
+    # convention for on-timeline generated text), not a <clipitem> pointing
+    # at a fake file, so it's found there instead (start 2s = 60 frames).
+    track1_item = v_tracks[1].find("generatoritem")
+    assert track1_item is not None
     assert track1_item.find("name").text == "title_overlay"
     assert track1_item.find("start").text == "60"
     assert track1_item.find("end").text == "150"  # (2 + 3) * 30
+    text_param = track1_item.find(".//effect[effectid='Text']/parameter[parameterid='str']/value")
+    assert text_param.text == "Chapter 1"
 
     # Verify audio track
     a_tracks = sequence.findall(".//media/audio/track")
@@ -154,8 +159,13 @@ def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path, mock_audio_
     # not silently dropped.
     clip_names = [c.attrib.get("name") for c in root.findall(".//spine/clip")]
     assert "narration" in clip_names
+
+    # Two <audio> elements are expected: one for the standalone "narration"
+    # AudioClip, and one for "hero_clip"'s own embedded video soundtrack
+    # (MediaClip.source_audio defaults to unmuted) -- a video clip's own
+    # audio must not be silently dropped either.
     audio_elems = root.findall(".//audio")
-    assert len(audio_elems) == 1
+    assert len(audio_elems) == 2
 
     narration_clip = next(c for c in root.findall(".//spine/clip") if c.attrib.get("name") == "narration")
     assert narration_clip.find("audio") is not None
@@ -163,6 +173,12 @@ def test_export_fcpxml_format(tmp_path: Path, mock_video_file: Path, mock_audio_
     ref_id = narration_clip.find("audio").attrib["ref"]
     referenced_asset = next(a for a in asset_elems if a.attrib["id"] == ref_id)
     assert referenced_asset.attrib.get("hasAudio") == "1"
+
+    hero_clip = next(c for c in root.findall(".//spine/clip") if c.attrib.get("name") == "hero_clip")
+    assert hero_clip.find("audio") is not None
+    hero_ref_id = hero_clip.find("audio").attrib["ref"]
+    hero_asset = next(a for a in asset_elems if a.attrib["id"] == hero_ref_id)
+    assert hero_asset.attrib.get("hasAudio") == "1"
 
 
 def test_export_fcpxml_multiple_audio_tracks_get_distinct_lanes(

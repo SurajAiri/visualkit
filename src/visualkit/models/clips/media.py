@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import Field
 
+from .audio import AudioProperties
 from .base import Source
 from .visual import VisualClip
 
@@ -16,6 +17,17 @@ class MediaClip(VisualClip):
     fps: float = Field(default=30.0, gt=0.0, description="Frames per second of the media clip")
     resolution: tuple[int, int] = Field(
         default=(1920, 1080), description="Resolution of the media clip (width, height)"
+    )
+
+    # Whether/how to include this clip's own embedded audio stream (e.g. a
+    # video file's soundtrack) in exports, distinct from any separate
+    # AudioClip placed on an audio track. Defaults to including it at full
+    # volume, matching what a person would expect from dropping a video
+    # with sound onto a track. For an image (no embedded audio), exporters
+    # simply find no audio stream to map and this field has no effect.
+    source_audio: AudioProperties = Field(
+        default_factory=AudioProperties,
+        description="Volume/mute controls for this clip's own embedded audio stream, if it has one",
     )
 
     linked_clip_id: str | None = Field(

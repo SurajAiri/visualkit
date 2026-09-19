@@ -1,10 +1,11 @@
 import hashlib
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from visualkit.coded_visual.project import CodedVisualManifest, load_coded_visual
+from visualkit.coded_visual.project import load_coded_visual
 from visualkit.models.clips.base import Size
 from visualkit.models.clips.coded_visual import CodedVisualClip, CompileStatus
 
@@ -182,14 +183,26 @@ class CodedVisualCompiler:
         force: bool = False,
     ) -> Path:
         """Render the prepared HTML bundle into an actual MP4 video file using headless Chrome and FFmpeg."""
-        import subprocess
-
         target_html, cache_key = self.prepare_bundle(clip)
         bundle_dir = target_html.parent
-        out_file = Path(output_path) if output_path else (bundle_dir / "render.mp4")
+        # A caller-supplied `output_path` is not itself derived from
+        # `cache_key`, so its mere existence on disk doesn't prove it was
+        # rendered from the *current* variables/state -- it could be a
+        # stale file left over from a previous compile of this same clip
+        # at a literal path the caller reuses across renders. The
+        # actual cache hit/miss signal is whether *this* cache_key's own
+        # bundle_dir already has a rendered output; only reuse a
+        # caller-supplied output_path once that's confirmed, and copy
+        # from the verified cache rather than trusting the path directly.
+        default_out_file = bundle_dir / "render.mp4"
+        out_file = Path(output_path) if output_path else default_out_file
 
-        # Reuse cached video if available
-        if out_file.exists() and not force:
+        if not force and default_out_file.exists():
+            if out_file != default_out_file:
+                import shutil as _shutil
+
+                out_file.parent.mkdir(parents=True, exist_ok=True)
+                _shutil.copyfile(default_out_file, out_file)
             clip.media_source = str(out_file)
             clip.compile_status = CompileStatus.READY
             return out_file
@@ -204,38 +217,125 @@ class CodedVisualCompiler:
         width = int(clip.canvas_size.width)
         height = int(clip.canvas_size.height)
 
-        # 1. Capture snapshot with Chrome headless
-        screenshot_file = bundle_dir / "snapshot.png"
-        chrome_cmd = [
-            chrome_bin,
-            "--headless=new",
-            f"--screenshot={screenshot_file}",
-            f"--window-size={width},{height}",
-            target_html.as_uri(),
-        ]
-        subprocess.run(
-            chrome_cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        # Render to the cache_key-addressed default location first, so
+        # the cache-hit check above (keyed on cache_key, via
+        # default_out_file) is always meaningful regardless of what
+        # output_path the caller passes; then copy/symlink to the
+        # caller's requested path if different.
+        self._capture_animated_frames(
+            target_html=target_html,
+            chrome_bin=chrome_bin,
+            bundle_dir=bundle_dir,
+            width=width,
+            height=height,
+            duration=duration,
+            fps=fps,
+            out_file=default_out_file,
         )
 
-        # 2. Encode to MP4 with FFmpeg
+        if out_file != default_out_file:
+            out_file.parent.mkdir(parents=True, exist_ok=True)
+            import shutil as _shutil
+
+            _shutil.copyfile(default_out_file, out_file)
+
+        clip.media_source = str(out_file)
+        clip.compile_status = CompileStatus.READY
+        return out_file
+
+    def _capture_animated_frames(
+        self,
+        *,
+        target_html: Path,
+        chrome_bin: str,
+        bundle_dir: Path,
+        width: int,
+        height: int,
+        duration: float,
+        fps: float,
+        out_file: Path,
+    ) -> None:
+        """Capture the coded visual's actual motion over `duration` and
+        encode it to `out_file`, instead of screenshotting a single
+        instant and looping that one still frame.
+
+        Previously this method took exactly one `--screenshot` and fed
+        it to ffmpeg with `-loop 1 -t duration`, so ANY animated HTML/CSS
+        (a CSS @keyframes animation, a JS-driven canvas, etc.) exported
+        as a frozen still for its entire duration -- there was no
+        mechanism to advance time and capture more than one instant.
+        This samples `capture_fps` frames evenly across `duration` by
+        reloading the page and waiting a computed delay (via Chrome's
+        `--virtual-time-budget`, which advances the page's own timers/
+        rAF/CSS-animation clock deterministically rather than relying on
+        real wall-clock time) before each screenshot, then stitches the
+        frame sequence into a video with ffmpeg at the timeline's `fps`.
+
+        Chrome's `--screenshot` flag itself only ever captures a single
+        frame per invocation, so one Chrome invocation per sampled frame
+        is unavoidable without a more involved CDP (Chrome DevTools
+        Protocol) screencast integration; `capture_fps` is deliberately
+        lower than typical output `fps` to keep render time reasonable,
+        and ffmpeg's own encoder duplicates frames to fill `fps` from
+        the sparser capture (motion still advances, just sampled less
+        finely than the final encode's frame rate).
+        """
+        frames_dir = bundle_dir / "frames"
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for old_frame in frames_dir.glob("frame_*.png"):
+            old_frame.unlink()
+
+        # Cap the number of real Chrome launches: each sampled frame is
+        # one full headless-Chrome process invocation, so sampling at the
+        # full output fps for a long clip would be very slow. 12fps is
+        # enough to read most CSS/JS motion as animated rather than
+        # janky, while keeping a multi-second clip's render time bounded.
+        capture_fps = min(fps, 12.0)
+        frame_count = max(1, round(duration * capture_fps))
+
+        for i in range(frame_count):
+            # virtual-time-budget advances the page's own clock (CSS
+            # animations, rAF callbacks, setTimeout/setInterval) by this
+            # many milliseconds before the screenshot is taken, rather
+            # than depending on real elapsed wall-clock time -- so the
+            # capture is deterministic and not at the mercy of how fast
+            # this machine happens to render each frame.
+            virtual_time_ms = int(round((i / capture_fps) * 1000))
+            frame_file = frames_dir / f"frame_{i:05d}.png"
+            chrome_cmd = [
+                chrome_bin,
+                "--headless=new",
+                f"--screenshot={frame_file}",
+                f"--window-size={width},{height}",
+                "--default-background-color=00000000",
+                f"--virtual-time-budget={max(virtual_time_ms, 1)}",
+                target_html.as_uri(),
+            ]
+            subprocess.run(
+                chrome_cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        # Stitch the sampled frame sequence into a video at capture_fps,
+        # then let ffmpeg's own fps filter interpolate/duplicate up to
+        # the timeline's actual `fps` for the final encode.
         ff_cmd = [
             "ffmpeg",
             "-y",
-            "-loop",
-            "1",
+            "-framerate",
+            str(capture_fps),
             "-i",
-            str(screenshot_file),
+            str(frames_dir / "frame_%05d.png"),
+            "-vf",
+            f"fps={fps}",
             "-c:v",
             "libx264",
             "-t",
             str(duration),
             "-pix_fmt",
             "yuv420p",
-            "-r",
-            str(fps),
             str(out_file),
         ]
         subprocess.run(
@@ -244,10 +344,6 @@ class CodedVisualCompiler:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-
-        clip.media_source = str(out_file)
-        clip.compile_status = CompileStatus.READY
-        return out_file
 
     def compile(
         self,

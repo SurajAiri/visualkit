@@ -71,6 +71,41 @@ class TimelinePipeline:
                     companion_volumes[clip.compound_clip_id] = 0.0 if clip.mute else clip.volume
                     companion_track_idx[clip.compound_clip_id] = track_idx
 
+        # Reserve every outer video track index first (0..N-1), then hand
+        # out non-overlapping blocks of *additional* destination tracks to
+        # each top-level CompoundClip whose reserved span would otherwise
+        # overlap another outer track's own content.
+        # Previously a compound's inner track 0 was assigned
+        # `base_v_track_idx=track_idx` unconditionally -- the same index
+        # as the outer video track the compound clip itself sits on -- so
+        # any other, unrelated clip sharing that same outer track (e.g. a
+        # second overlay, or a second CompoundClip), or sharing any outer
+        # track the compound's *wider* inner span would reach, collided
+        # with the compound's inner content in the flattened output. A
+        # compound whose entire reserved span sits on otherwise-empty
+        # outer track slots has nothing to collide with there, so it
+        # keeps reusing that track index (matching prior behavior exactly
+        # for the common single-clip-per-track case); only genuine
+        # overlap with another track's content triggers reserving a
+        # dedicated block elsewhere.
+        next_free_v_track = len(timeline.video_tracks)
+        compound_v_track_base: dict[str, int] = {}
+        for track_idx, v_track in enumerate(timeline.video_tracks):
+            for clip in v_track.clips:
+                if not isinstance(clip, CompoundClip):
+                    continue
+                span = self._compound_video_track_span(clip)
+                span_range = range(track_idx, track_idx + span)
+                overlaps_other_content = any(
+                    i != track_idx and i < len(timeline.video_tracks) and len(timeline.video_tracks[i].clips) > 0
+                    for i in span_range
+                ) or len(v_track.clips) > 1
+                if overlaps_other_content:
+                    compound_v_track_base[clip.id] = next_free_v_track
+                    next_free_v_track += span
+                else:
+                    compound_v_track_base[clip.id] = track_idx
+
         # 2. Process Video Tracks
         for track_idx, v_track in enumerate(timeline.video_tracks):
             while len(flattened.video_tracks) <= track_idx:
@@ -88,7 +123,7 @@ class TimelinePipeline:
                     self._flatten_compound_clip(
                         compound=clip,
                         target_timeline=flattened,
-                        base_v_track_idx=track_idx,
+                        base_v_track_idx=compound_v_track_base[clip.id],
                         base_a_track_idx=base_a_track_idx,
                         companion_volumes=companion_volumes,
                     )
@@ -111,6 +146,30 @@ class TimelinePipeline:
                     flattened.audio_tracks[track_idx].add_clip(deepcopy(clip))
 
         return flattened
+
+    @classmethod
+    def _compound_video_track_span(cls, compound: CompoundClip) -> int:
+        """How many destination video tracks `compound` needs for itself
+        and all its nested compounds, so sibling clips get non-overlapping
+        destination ranges. At minimum 1 (even an empty/no-inner-timeline
+        compound reserves its own slot, so index arithmetic for whatever
+        comes after it stays simple and it can't accidentally overlap a
+        sibling that does have content).
+        """
+        if not compound.inner_timeline:
+            return 1
+
+        span = len(compound.inner_timeline.video_tracks) or 1
+        # A nested CompoundClip expands into *additional* tracks beyond
+        # its own inner-track slot (see flatten()'s reservation pass),
+        # so the parent's total span must include however much extra
+        # room each nested compound will consume beyond the single slot
+        # already counted for the inner track it sits on.
+        for v_track in compound.inner_timeline.video_tracks:
+            for child in v_track.clips:
+                if isinstance(child, CompoundClip):
+                    span += cls._compound_video_track_span(child) - 1
+        return span
 
     def process(
         self,
@@ -258,4 +317,5 @@ class TimelinePipeline:
             fps=clip.fps,
             resolution=(int(clip.canvas_size.width), int(clip.canvas_size.height)),
             transform=clip.transform,
+            source_audio=clip.source_audio,
         )

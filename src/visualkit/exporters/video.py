@@ -3,6 +3,7 @@ import logging
 import shutil
 import subprocess
 import textwrap
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -10,10 +11,157 @@ from visualkit.exporters.base import BaseExporter
 from visualkit.models.clips.audio import AudioClip
 from visualkit.models.clips.media import MediaClip
 from visualkit.models.clips.text import TextClip
+from visualkit.models.clips.visual import Transform
 from visualkit.models.timeline import Timeline
-from visualkit.utils.time import Time
+from visualkit.utils.exceptions import VisualKitError
 
 logger = logging.getLogger(__name__)
+
+
+class MissingSourceError(VisualKitError):
+    """Raised when a clip's source file cannot be found at export time.
+
+    Previously a missing source only logged a warning and the clip was
+    silently skipped, so `export()` would return a "successful" path
+    whose video is missing content the caller has no easy way to notice
+    short of watching the whole thing. Failing loudly means a bad export
+    is caught immediately rather than discovered later.
+    """
+
+
+@lru_cache(maxsize=256)
+def _file_has_audio_stream(path: str) -> bool:
+    """Probe whether a media file has at least one audio stream, via
+    `ffprobe`. Needed because `MediaClip.source_audio` only controls
+    whether an *existing* embedded audio stream should be included --
+    it can't turn a genuinely video-only file into one that has audio.
+    Mapping `N:a` from an input with no audio stream at all is an ffmpeg
+    hard error, so this must be checked before attempting to map it.
+    Cached since the same source file is commonly referenced by more
+    than one clip (e.g. after a split) within one export.
+    Returns False (rather than raising) if ffprobe itself is unavailable
+    or the file can't be probed, since silently omitting audio when in
+    doubt was also the prior (if for the wrong reason) default behavior,
+    and it is safer than crashing the whole export over a probe failure.
+    """
+    if not shutil.which("ffprobe"):
+        logger.warning("ffprobe not found on PATH; assuming '%s' has no audio stream.", path)
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=index",
+                "-of",
+                "csv=p=0",
+                path,
+            ],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (subprocess.CalledProcessError, OSError):
+        return False
+    return bool(result.stdout.decode("utf-8", errors="replace").strip())
+
+
+def _atempo_chain(speed: float) -> str:
+    """Build an ffmpeg audio filter chain implementing an arbitrary speed
+    multiplier via `atempo`.
+
+    `atempo` only accepts a single stage's tempo factor in [0.5, 100.0]
+    (see `ffmpeg -h filter=atempo`); values outside that range are
+    achieved by chaining multiple `atempo` stages whose product is the
+    desired speed (e.g. speed=0.1 -> atempo=0.5,atempo=0.2). This
+    decomposes `speed` into a sequence of factors each within [0.5, 100.0].
+    """
+    if speed <= 0:
+        raise ValueError(f"speed must be positive, got {speed}")
+
+    stages: list[float] = []
+    remaining = speed
+    # Repeatedly peel off a factor of at most 100.0 or at least 0.5 until
+    # the remaining multiplier itself fits in one stage.
+    while remaining > 100.0:
+        stages.append(100.0)
+        remaining /= 100.0
+    while remaining < 0.5:
+        stages.append(0.5)
+        remaining /= 0.5
+    stages.append(remaining)
+
+    return ",".join(f"atempo={s:.6f}" for s in stages)
+
+
+def _transform_filters(transform: Transform, width: int, height: int) -> tuple[str, int, int]:
+    """Build the ffmpeg video-filter chain implementing `transform` for a
+    clip being composited onto a `width`x`height` canvas.
+
+    Returns (filter_chain_without_labels, effective_w, effective_h) --
+    the effective size is needed by the caller to compute the overlay
+    x/y position, since `overlay`'s own x/y refer to the *scaled* frame,
+    not the original source resolution.
+
+    Order matches Transform's own documented contract: fit -> zoom (crop
+    then scale back to fill) -> scale (uniform multiplier) -> rotate ->
+    opacity. Position is applied by the caller via `overlay=x:y`, since
+    that's a compositing position rather than a property of the frame
+    itself.
+    """
+    # 1. Fit to explicit Size, or to the canvas if Size is (0, 0).
+    if transform.size.width > 0 and transform.size.height > 0:
+        target_w, target_h = int(transform.size.width), int(transform.size.height)
+    else:
+        target_w, target_h = width, height
+
+    filters = [
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black@0",
+    ]
+
+    # 2. Zoom: crop into the center by 1/zoom, then scale back up to fill
+    # the same target_w x target_h footprint. zoom=1.0 is a no-op (no
+    # crop, no rescale) since it's the identity value.
+    if transform.zoom != 1.0 and transform.zoom > 0:
+        crop_w = max(1, round(target_w / transform.zoom))
+        crop_h = max(1, round(target_h / transform.zoom))
+        filters.append(f"crop={crop_w}:{crop_h}:(iw-{crop_w})/2:(ih-{crop_h})/2")
+        filters.append(f"scale={target_w}:{target_h}")
+
+    # 3. Scale: uniform multiplier on the whole frame's own footprint
+    # (distinct from zoom -- this changes the frame's size, not what's
+    # visible within it).
+    effective_w, effective_h = target_w, target_h
+    if transform.scale != 1.0:
+        effective_w = max(1, round(target_w * transform.scale))
+        effective_h = max(1, round(target_h * transform.scale))
+        filters.append(f"scale={effective_w}:{effective_h}")
+
+    # 4. Rotation, in degrees -> radians for ffmpeg's `rotate` filter.
+    # `rotate` needs an alpha channel to show transparency in the
+    # corners it exposes, so format is forced to rgba beforehand whenever
+    # rotation or opacity requires alpha compositing.
+    needs_alpha = transform.rotation != 0.0 or transform.opacity != 100
+    if needs_alpha:
+        filters.append("format=rgba")
+    if transform.rotation != 0.0:
+        import math
+
+        radians = math.radians(transform.rotation)
+        filters.append(f"rotate={radians}:c=black@0")
+
+    # 5. Opacity last, via colorchannelmixer scaling the alpha channel by
+    # the 0-100 percent (as a 0.0-1.0 fraction).
+    if transform.opacity != 100:
+        alpha_mult = transform.opacity / 100.0
+        filters.append(f"colorchannelmixer=aa={alpha_mult}")
+
+    return ",".join(filters), effective_w, effective_h
 
 
 class FFmpegVideoExporter(BaseExporter):
@@ -75,6 +223,7 @@ class FFmpegVideoExporter(BaseExporter):
         # Build FFmpeg command
         cmd: list[str] = ["ffmpeg", "-y"]
         filter_complex: list[str] = []
+        audio_labels: list[str] = []
 
         # Input 0: Base background canvas
         cmd.extend(
@@ -92,70 +241,146 @@ class FFmpegVideoExporter(BaseExporter):
         # Process Video Inputs
         for track_idx, clip in video_items:
             source_file: Path | None = None
+            source_start_s = 0.0
+            speed = getattr(clip, "speed", 1.0)
             if isinstance(clip, MediaClip):
                 resolved_src = self._resolve_source(clip.source.source)
                 source_file = Path(resolved_src)
+                source_start_s = clip.source.start.seconds
             elif isinstance(clip, TextClip):
                 # Render text clip to a styled SVG/PNG for FFmpeg input
                 source_file = self._render_text_to_image(clip, width, height)
 
             if not source_file or not source_file.exists():
-                logger.warning(
-                    "Skipping video clip '%s': source file not found (%s).",
-                    clip.id,
-                    source_file,
+                # Previously this only logged a warning and `continue`d,
+                # so export() returned a "successful" path silently
+                # missing this clip's content. A caller has no cheap way
+                # to detect that short of inspecting the video by hand, so
+                # this now fails the whole export instead.
+                raise MissingSourceError(
+                    f"Cannot export: source file for clip '{clip.id}' was not found "
+                    f"({source_file})."
                 )
-                continue
 
-            # Add input
+            # Add input. For a MediaClip, -ss before -i seeks to
+            # source.start before decoding -- previously source.start was
+            # never read at all, so every clip (including the second half
+            # of a split/trimmed clip) always replayed its file from the
+            # very beginning.
             is_image = source_file.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".svg")
             if is_image:
-                cmd.extend(["-loop", "1", "-t", str(clip.duration.seconds), "-i", str(source_file)])
+                # Loop duration must cover the full source span this clip
+                # will read (duration * speed, computed below as
+                # source_span_s), not just clip.duration -- otherwise a
+                # sped-up TextClip/image would run out of looped frames
+                # partway through its own trim.
+                loop_span_s = clip.duration.seconds * speed
+                cmd.extend(["-loop", "1", "-t", str(loop_span_s), "-i", str(source_file)])
             else:
+                if source_start_s > 0:
+                    cmd.extend(["-ss", str(source_start_s)])
                 cmd.extend(["-i", str(source_file)])
 
-            # Clip filter: scale and set PTS
+            this_input = input_index
             start_s = clip.timeline_start.seconds
             end_s = start_s + clip.duration.seconds
-            label_scaled = f"v_scaled_{input_index}"
-            label_next = f"v_comp_{input_index}"
+            # Span of source content to actually read for this clip:
+            # duration * speed, since a faster-than-1x clip consumes more
+            # source per timeline-second (see the same reasoning in the
+            # Resolve exporter's in/out handling). Previously always just
+            # `clip.duration.seconds`, so `speed` had no effect on either
+            # exporter.
+            source_span_s = clip.duration.seconds * speed
 
+            transform = getattr(clip, "transform", Transform())
+            transform_chain, eff_w, eff_h = _transform_filters(transform, width, height)
+
+            # overlay's x/y are the top-left corner of the (already
+            # scaled) overlay frame on the base canvas; Transform.position
+            # is a center-relative pixel offset, so it's converted here.
+            overlay_x = (width - eff_w) / 2 + transform.position.x
+            overlay_y = (height - eff_h) / 2 + transform.position.y
+
+            label_scaled = f"v_scaled_{this_input}"
+            label_next = f"v_comp_{this_input}"
+
+            # setpts divides by speed (not multiplies): a clip playing at
+            # speed=2 should show 2 seconds of source content in 1 second
+            # of timeline time, i.e. its presentation timestamps need to
+            # run twice as fast, which is PTS/2 not PTS*2. Previously
+            # there was no speed-aware term here at all, so `speed` had no
+            # effect on playback rate.
             filter_complex.append(
-                f"[{input_index}:v]trim=duration={clip.duration.seconds},"
-                f"setpts=PTS-STARTPTS+{start_s}/TB,"
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black@0[{label_scaled}]"
+                f"[{this_input}:v]trim=duration={source_span_s},"
+                f"setpts=(PTS-STARTPTS)/{speed}+{start_s}/TB,"
+                f"{transform_chain}[{label_scaled}]"
             )
 
             # Overlay onto composite
             filter_complex.append(
-                f"{current_video_label}[{label_scaled}]overlay=enable='between(t,{start_s},{end_s})'[{label_next}]"
+                f"{current_video_label}[{label_scaled}]overlay="
+                f"x={overlay_x}:y={overlay_y}:enable='between(t,{start_s},{end_s})'[{label_next}]"
             )
             current_video_label = f"[{label_next}]"
+
+            # A MediaClip's own embedded audio (e.g. a video file's
+            # soundtrack) is pulled from the *same* input's `:a` stream --
+            # not a second `-i` of the same file -- since ffmpeg indexes
+            # audio/video streams of one input together. Previously
+            # nothing here ever referenced `{this_input}:a}`, so a video's
+            # own audio was always silently dropped from the export even
+            # when the source file had a soundtrack.
+            source_audio = getattr(clip, "source_audio", None)
+            if (
+                isinstance(clip, MediaClip)
+                and source_audio is not None
+                and not source_audio.muted
+                and not is_image
+                and _file_has_audio_stream(str(source_file))
+            ):
+                embedded_label = self._add_audio_stream(
+                    filter_complex,
+                    stream_ref=f"{this_input}:a",
+                    volume=source_audio.volume,
+                    start_s=start_s,
+                    source_start_s=0.0,  # already consumed via -ss on this input, above
+                    span_s=source_span_s,
+                    speed=speed,
+                    label_suffix=f"embed_{this_input}",
+                )
+                audio_labels.append(embedded_label)
+
             input_index += 1
 
         # Process Audio Inputs
-        audio_labels: list[str] = []
         for a_clip in audio_items:
             resolved_a_src = self._resolve_source(a_clip.source.source)
             source_file = Path(resolved_a_src)
             if not source_file.exists():
-                logger.warning(
-                    "Skipping audio clip '%s': source file not found (%s).",
-                    a_clip.id,
-                    source_file,
+                raise MissingSourceError(
+                    f"Cannot export: source file for audio clip '{a_clip.id}' was not found "
+                    f"({source_file})."
                 )
-                continue
 
+            source_start_s = a_clip.source.start.seconds
+            speed = a_clip.speed
+            source_span_s = a_clip.duration.seconds * speed
+
+            if source_start_s > 0:
+                cmd.extend(["-ss", str(source_start_s)])
             cmd.extend(["-i", str(source_file)])
-            start_ms = int(round(a_clip.timeline_start.seconds * 1000))
-            vol = a_clip.audio_properties.volume if not a_clip.audio_properties.muted else 0.0
 
-            a_label = f"[a_{input_index}]"
-            if start_ms > 0:
-                filter_complex.append(f"[{input_index}:a]volume={vol},adelay={start_ms}|{start_ms}{a_label}")
-            else:
-                filter_complex.append(f"[{input_index}:a]volume={vol}{a_label}")
+            vol = a_clip.audio_properties.volume if not a_clip.audio_properties.muted else 0.0
+            a_label = self._add_audio_stream(
+                filter_complex,
+                stream_ref=f"{input_index}:a",
+                volume=vol,
+                start_s=a_clip.timeline_start.seconds,
+                source_start_s=0.0,  # already consumed via -ss above
+                span_s=source_span_s,
+                speed=speed,
+                label_suffix=f"a_{input_index}",
+            )
             audio_labels.append(a_label)
             input_index += 1
 
@@ -198,14 +423,68 @@ class FFmpegVideoExporter(BaseExporter):
             ]
         )
 
-        subprocess.run(
+        result = subprocess.run(
             cmd,
-            check=True,
+            check=False,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        if result.returncode != 0:
+            # Previously stderr was discarded (DEVNULL), so a failure
+            # here surfaced only as a bare CalledProcessError with no
+            # indication of *why* ffmpeg rejected the input (a corrupt
+            # file, an unsupported codec, a filter error, etc.).
+            stderr_text = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, output=None, stderr=stderr_text
+            )
 
         return out_path
+
+    @staticmethod
+    def _add_audio_stream(
+        filter_complex: list[str],
+        *,
+        stream_ref: str,
+        volume: float,
+        start_s: float,
+        source_start_s: float,
+        span_s: float,
+        speed: float,
+        label_suffix: str,
+    ) -> str:
+        """Build the audio filter chain for one audio stream (a standalone
+        AudioClip or a MediaClip's own embedded track) and append it to
+        `filter_complex`. Returns the output label.
+
+        Applies, in order: atrim (source.start/duration -- previously
+        never applied, so e.g. a 2s AudioClip trimmed from a 6s file
+        played the whole 6s), speed via an atempo chain (previously
+        ignored for audio the same way it was for video), volume/mute,
+        and adelay to place it at its timeline start.
+        """
+        label = f"[a_{label_suffix}]"
+        stages = [f"[{stream_ref}]"]
+        parts: list[str] = []
+
+        if source_start_s > 0 or span_s > 0:
+            trim = f"atrim=start={source_start_s}"
+            if span_s > 0:
+                trim += f":duration={span_s}"
+            parts.append(trim)
+            parts.append("asetpts=PTS-STARTPTS")
+
+        if speed != 1.0:
+            parts.append(_atempo_chain(speed))
+
+        parts.append(f"volume={volume}")
+
+        start_ms = int(round(start_s * 1000))
+        if start_ms > 0:
+            parts.append(f"adelay={start_ms}|{start_ms}")
+
+        filter_complex.append("".join(stages) + ",".join(parts) + label)
+        return label
 
     def _render_text_to_image(self, clip: TextClip, width: int, height: int) -> Path:
         """Render a TextClip to a transparent PNG snapshot using Chrome for FFmpeg compositing.

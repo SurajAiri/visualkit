@@ -104,6 +104,7 @@ class CodedVisualClip(MediaClip):
             description=description,
         )
         self.variables[name] = var
+        self._invalidate_compile()
         return var
 
     def set_variable(self, name: str, value: Any) -> None:
@@ -112,6 +113,25 @@ class CodedVisualClip(MediaClip):
             self.variables[name].value = value
         else:
             self.variables[name] = Variable(name=name, value=value, default=value)
+        self._invalidate_compile()
+
+    def _invalidate_compile(self) -> None:
+        """Mark this clip's compiled output as stale.
+
+        `_compile()` previously short-circuited purely on
+        `compile_status == READY and media_source` being set, with
+        nothing anywhere resetting `compile_status` when a variable
+        changed after the first successful compile -- so
+        `set_variable("title", "Second")` after an initial compile would
+        leave the stale READY status (and the old rendered media_source)
+        in place, and a re-flatten would keep reusing the first render.
+        Called from every mutator that can change what the compiled
+        output should look like (variable assignments/definitions), so a
+        change always forces recompilation on the next `_compile()` call,
+        regardless of how it happened.
+        """
+        if self.compile_status == CompileStatus.READY:
+            self.compile_status = CompileStatus.PENDING
 
     def get_variable(self, name: str) -> Variable | None:
         """Get the Variable model for a given variable name."""
@@ -178,4 +198,5 @@ class CodedVisualClip(MediaClip):
             fps=self.fps,
             resolution=(int(self.canvas_size.width), int(self.canvas_size.height)),
             transform=self.transform,
+            source_audio=self.source_audio,
         )

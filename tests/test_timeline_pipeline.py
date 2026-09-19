@@ -140,26 +140,36 @@ def test_flatten_compound_timeline(sample_template_html: Path):
         for clip in track.clips:
             assert clip.clip_type not in ("compound", "compound_audio", "coded_visual")
 
-    # Check flattened video tracks
-    assert len(flattened.video_tracks) >= 2
+    # Check flattened video tracks. The compound reserves its own block of
+    # destination tracks distinct from the outer track it sits on (track
+    # 0, alongside intro_title) -- previously the compound's inner track 0
+    # collided with whatever else shared that same outer track index, so
+    # intro_title and the compound's own inner track 0 content would have
+    # incorrectly landed on the same flattened track together.
+    assert len(flattened.video_tracks) >= 3
 
-    # Track 0: intro_title (0s) + resolved media from infographic (4s + 1s = 5s)
+    # Track 0: only intro_title -- the outer track the compound clip itself
+    # sits on, untouched by the compound's own inner content.
     v0_clips = flattened.video_tracks[0].clips
-    assert len(v0_clips) == 2
+    assert len(v0_clips) == 1
     assert v0_clips[0].id == "intro_title"
     assert v0_clips[0].timeline_start.seconds == 0.0
 
-    media_clip = v0_clips[1]
+    # Track 1: the compound's inner track 0 (the infographic), in its own
+    # reserved slot.
+    v1_clips = flattened.video_tracks[1].clips
+    assert len(v1_clips) == 1
+    media_clip = v1_clips[0]
     assert isinstance(media_clip, MediaClip)
     assert media_clip.timeline_start.seconds == 5.0  # 4s (compound start) + 1s (inner start)
     assert media_clip.duration.seconds == 3.0
     assert media_clip.source.source.endswith("index.html")
 
-    # Track 1: expanded overlay text (4s + 0.5s = 4.5s)
-    v1_clips = flattened.video_tracks[1].clips
-    assert len(v1_clips) == 1
-    assert v1_clips[0].id == "overlay_text"
-    assert v1_clips[0].timeline_start.seconds == 4.5
+    # Track 2: the compound's inner track 1 (expanded overlay text, 4s + 0.5s = 4.5s).
+    v2_clips = flattened.video_tracks[2].clips
+    assert len(v2_clips) == 1
+    assert v2_clips[0].id == "overlay_text"
+    assert v2_clips[0].timeline_start.seconds == 4.5
 
     # Audio Track 0: whoosh sfx (4s + 0.5s = 4.5s) with volume 0.8 * 0.5 = 0.4
     a0_clips = flattened.audio_tracks[0].clips
