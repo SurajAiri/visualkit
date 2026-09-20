@@ -33,15 +33,19 @@ class Size(VisualKitModel):
     instead of the fit-to-canvas default.
     """
 
-    width: float = Field(default=0.0, ge=0.0, description="Explicit target width in pixels (0 = fit to canvas)")
-    height: float = Field(default=0.0, ge=0.0, description="Explicit target height in pixels (0 = fit to canvas)")
+    width: float = Field(
+        default=0.0, ge=0.0, description="Explicit target width in pixels (0 = fit to canvas)"
+    )
+    height: float = Field(
+        default=0.0, ge=0.0, description="Explicit target height in pixels (0 = fit to canvas)"
+    )
 
 
 class Source(VisualKitModel):
     """Represents a media source for a clip."""
 
-    source: str = Field(..., description="Reference to the asset or media source for the clip")
-    start: Time = Field(default=Time.zero(), description="Start time of the clip in the source media")
+    source: str = Field(..., min_length=1, description="Reference to the asset or media source for the clip")
+    start: Time = Field(default_factory=Time.zero, description="Start time of the clip in the source media")
 
     @model_validator(mode="wrap")
     @classmethod
@@ -56,12 +60,16 @@ class BaseClip(VisualKitModel, ABC):
     """Base Class for all media & visual clips placed on a track"""
 
     id: str = Field(
-        default_factory=lambda: f"clip_{uuid.uuid4().hex[:8]}", description="Unique identifier for the clip"
+        default_factory=lambda: f"clip_{uuid.uuid4().hex[:8]}",
+        min_length=1,
+        description="Unique identifier for the clip",
     )
 
     # changable properties
-    timeline_start: Time = Field(default=Time.zero(), description="Start time of the clip on the timeline")
-    duration: Time = Field(default=Time.zero(), description="Duration of the clip")
+    timeline_start: Time = Field(
+        default_factory=Time.zero, description="Start time of the clip on the timeline"
+    )
+    duration: Time = Field(default_factory=Time.zero, description="Duration of the clip")
     speed: float = Field(
         default=1.0,
         gt=0.0,

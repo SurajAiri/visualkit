@@ -14,15 +14,22 @@ file for import into DaVinci Resolve.
 ## Requirements
 
 - Python >= 3.12
-- [FFmpeg](https://ffmpeg.org/) on your `PATH`, for standalone video export
-- A Chrome or Chromium install, for rendering `CodedVisualClip`s (and
-  `TextClip`s exported via `FFmpegVideoExporter`) — VisualKit looks for a
-  system install; it does not bundle a browser
+- [FFmpeg](https://ffmpeg.org/) on your `PATH`, for standalone video export and for
+  encoding animated coded visuals
+- A Chrome or Chromium install, for `CodedVisualClip`s and for `TextClip`s exported
+  with `FFmpegVideoExporter`. VisualKit never bundles or downloads a browser. It
+  looks, in order, at the `VISUALKIT_CHROME` environment variable, your `PATH`,
+  the usual install locations, and browsers cached by Playwright/Puppeteer.
+  `chrome-headless-shell` is preferred when present (smaller and faster to start).
+- Optional: `playwright` (`pip install "visualkit[render]"`), needed only to render
+  **animated** coded visuals. It is used purely as a driver for the Chrome above.
+  Still visuals, text, and everything else work without it.
 
 ## Installation
 
 ```bash
-pip install -e .
+pip install -e .              # core
+pip install -e ".[render]"    # + animated coded visuals
 ```
 
 (This project isn't yet published to PyPI; install from a local checkout.)
@@ -61,7 +68,7 @@ See `examples/` for runnable walkthroughs of each feature area:
 | Example | Covers |
 |---|---|
 | `01_basic_timeline.py` | Building a timeline from media/text/audio clips, multi-track layout, exporting |
-| `02_coded_visuals.py` | `CodedVisualClip`: rendering an HTML/CSS/JS bundle into a media clip |
+| `02_coded_visuals.py` | `CodedVisualClip`: a bundle with a manifest, typed variables, a still preview, and an animated render |
 | `03_compound_clips_and_templates.py` | `CompoundClip` as a grouping/template mechanism with exposed `Variable`s |
 | `04_asset_resolvers.py` | Resolving abstract asset references (`asset://...`) to real files at export time |
 
@@ -87,43 +94,105 @@ overridden per-instance (`compound.set_parameter(name, value)`) without
 touching the inner timeline's structure. A compound's own `speed` compresses
 its entire inner timeline proportionally when flattened.
 
-**CodedVisualClip.** References a small HTML/CSS/JS project (a "coded
-visual") — e.g. an animated infographic — that gets compiled by
-`CodedVisualCompiler` into a concrete media file (a still image if
-`render_video=False`, or a video via headless Chrome + ffmpeg if
-`render_video=True`) before export. The coded visual's own aspect ratio is
-preserved and scaled to fit its `Transform`/canvas without distorting the
-layout.
+**CodedVisualClip.** References a small HTML/CSS/JS project (a "coded visual"),
+such as an animated infographic, either a single `.html` file or a directory
+bundle (`index.html` + `manifest.json` + local images/SVGs/CSS/JS). It is *not*
+itself media: `CodedVisualCompiler` renders it in headless Chrome into a real
+file, a **PNG** for a still visual or an **MP4** for an animated one, and that file
+is what the timeline and exporters use. See [Coded visuals](#coded-visuals) below.
 
 **Flattening.** `timeline.flatten()` (used internally by both exporters)
-resolves `Variable`s, compiles any `CodedVisualClip`s, and expands
-`CompoundClip`s into plain clips with absolute timeline coordinates —
-producing a timeline made only of `MediaClip`/`TextClip`/`AudioClip`.
+applies template parameters, renders any `CodedVisualClip`s, and expands
+`CompoundClip`s into plain clips with absolute timeline coordinates, giving a
+timeline made only of `MediaClip`/`TextClip`/`AudioClip`. **It never modifies the
+timeline you call it on**, so exporting cannot change your templates. A compound's
+own `transform` is composed onto its children, and its content is trimmed to the
+compound's `duration`.
+
+## Coded visuals
+
+```python
+clip = vk.CodedVisualClip(id="card", source="assets/stat_card", duration=vk.Time(4))
+clip.load_manifest()  # canvas size + variable schema from the bundle
+clip.set_variable("title", "Active users")
+clip.set_variable("accent", "#22c55e")  # typed: a bad color raises immediately
+timeline.add_clip(clip)
+timeline.export_to_video("out.mp4")  # renders, then composites like any media clip
+```
+
+**Design canvas and scaling.** A visual is authored against a fixed design canvas
+(`<meta name="canvas-size" content="1920x1080">`, or `canvas_size` in `manifest.json`,
+or set on the clip; `clip.design_size` reports the effective one; `canvas_size` itself
+is `None` until set explicitly). Put your content inside `.visualkit-canvas`. It is
+always rendered at exactly that size and scaled, aspect ratio preserved, to fit
+whatever frame it lands in, so the layout never reflows. The 9:16 (vertical), 1:1 and
+16:9 cases are all just a different design size.
+
+**Variables and templates.** `{{ name }}` in the HTML is replaced by the
+**HTML-escaped** value. Use `{{{ name }}}` for trusted raw HTML. The same values are
+available to script as `window.__VARIABLES__.name`, already typed. Variable types
+(`string`, `number`, `boolean`, `color`, `asset`, `json`) are enforced. Declare them
+in `manifest.json` with labels and descriptions to make a bundle a reusable scene
+template. Wrap a visual in a `CompoundClip` and `expose_parameter(...)` to drive it
+per instance. Placeholders inside `<style>` are HTML-escaped as well, which is safe
+for validated `color`/`number` variables but not for arbitrary strings.
+
+**Local assets.** Images, SVGs, fonts, CSS and JS beside `index.html` load normally.
+Editing any of them invalidates the cached render.
+
+**Still vs. animated.** `render_mode` is `auto` by default: a page with motion becomes a
+video, a static one a PNG. Detection uses the manifest's `animated` flag if set, else
+renders the page at two times and compares. Animation is stepped deterministically
+(CSS/Web Animations are seeked; `Date`, `setTimeout`, `setInterval` and
+`requestAnimationFrame` run on a virtual clock), so output is identical on every
+machine. Frames stream straight into FFmpeg. Pass `render_video=True`/`False` to
+`flatten()`/`export_*()` to override.
+
+**Limits.** Determinism is guaranteed for CSS/Web Animations and for the JavaScript timing
+APIs listed above. Anything else that depends on real time (`<video>`/`<audio>` elements,
+WebGL or canvas code that reads other clocks, network fetches) is **not** guaranteed to be
+frame-exact. Pre-render such media and reference it as a normal clip instead. Only
+HTML/CSS/JS visuals exist today; other compilers are a possible future extension.
 
 ## Exporting
 
-- **`timeline.export_to_video(path, **kwargs)`** — renders a standalone
-  video file via `FFmpegVideoExporter`. Requires `ffmpeg` on `PATH`; `.html`-
-  based clips (`TextClip`, `CodedVisualClip`) additionally require a
-  Chrome/Chromium install to rasterize.
-- **`timeline.export_to_resolve(path, **kwargs)`** — writes an NLE project
-  file via `DaVinciResolveExporter`. `.xml` produces FCP7 XML (XMEML), the
-  more established path for DaVinci Resolve; `.fcpxml` produces Apple
-  FCPXML v1.10 (its exact spine/lane layout hasn't been verified against a
-  real Resolve import — prefer XMEML if you hit import issues).
+- **`timeline.export_to_video(path, **kwargs)`**: renders a standalone video via
+  `FFmpegVideoExporter`. Text size is relative to a 1080p reference frame
+  (`font_size=48` is 48px at 1080p) so a 360p preview matches the 1080p render. A failed
+  encode raises `ExportError` carrying FFmpeg's own output, and the destination file is
+  only replaced on success.
+- **`timeline.export_to_resolve(path, **kwargs)`**: writes an NLE project via
+  `DaVinciResolveExporter`. `.xml` produces FCP7 XML (XMEML), the more established path
+  for DaVinci Resolve. `.fcpxml` produces Apple FCPXML 1.10. NTSC rates (29.97, 23.976,
+  59.94) use their exact rational frame rate, and FCPXML times are frame-aligned
+  rationals.
 
-Both exporters accept an `asset_resolver` — a callable or an object with a
-`.resolve(str) -> str` method — for mapping abstract source references
-(e.g. `asset://b_roll`) to real file paths or URLs at export time. See
-`visualkit.engine.asset_resolver.DictAssetResolver` for a simple built-in
-resolver, or `examples/04_asset_resolvers.py`.
+  > **Verify in your NLE.** XMEML and FCPXML *position* conventions were implemented from
+  > the format specifications and are covered by structural tests, but have **not** been
+  > checked against a live DaVinci Resolve import. Test a positioned clip before relying
+  > on it. Scale, opacity and timing are the well-trodden parts.
+
+Both exporters accept an `asset_resolver`, a callable or an object with a
+`.resolve(str) -> str` method, for mapping abstract source references
+(e.g. `asset://b_roll`) to real paths or URLs at export time. See
+`visualkit.engine.asset_resolver.DictAssetResolver` or `examples/04_asset_resolvers.py`.
+
+## Errors
+
+All library errors derive from `visualkit.VisualKitError`: `InvalidTimeError`,
+`TimelineValidationError`, `TemplateParameterError` (an exposed parameter targets a
+missing clip/property, or a protected field such as `id`), `MissingSourceError`,
+`ExportError`, and the coded-visual family `CodedVisualError` >
+`CodedVisualCompileError` > `BrowserNotFoundError`. Timeline edits (`split_clip`,
+`move_clip_track`, and `add_clip`, including a batch of several clips) are atomic: a rejected
+edit leaves the timeline exactly as it was.
 
 ## Development
 
 ```bash
-uv sync --group dev   # or: pip install -e ".[dev]" equivalent via pyproject dependency-groups
+uv sync --group dev        # includes playwright + pillow so the render tests run
 pytest
-ruff check .
+ruff check . && ruff format --check .
 ```
 
 ## License

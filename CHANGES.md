@@ -1,4 +1,114 @@
-# VisualKit — Review Findings & Fixes
+# VisualKit — Changelog
+
+## Second review pass (this release)
+
+Baseline at the start of this pass: 104 tests, 102 passing (the 2 failures were Chrome not being
+discoverable). Now: **298 tests passing**, `ruff check` and `ruff format --check` clean, and the
+built wheel installs and works in a clean virtualenv (with and without the `render` extra).
+New regression tests cover every fix below. For the highest-risk ones (render cache key, HTML
+escaping, partial-file cleanup, flatten clipping / transform composition / non-mutation, and
+atomic rollback) I deliberately removed the fix and confirmed the tests fail; four rollback tests
+that passed vacuously were rewritten that way. The Time, Variable, Resolve-exporter and
+video-transform tests were checked against real output but not mutation-tested.
+
+### Behavior changes you should know about
+
+These are deliberate and may affect existing code.
+
+- **Coded visuals render to real media.** `compile()` used to produce an *HTML file* and treat
+  it as the clip's media. It now produces a PNG (still) or MP4 (animated). `media_source` is never HTML.
+- **`render_video` defaults to auto** in `flatten()`, `export_to_video()` and `export_to_resolve()`
+  (it was `False`/`True`, so an animated visual could silently export as one frozen frame).
+  Pass `True`/`False` to force.
+- **`CodedVisualClip.canvas_size` and `aspect_ratio` are `None` until set** so a visual's own
+  manifest/`<meta>` size can win instead of being overridden by a 1920x1080 default. Use
+  `clip.design_size` / `clip.design_aspect_ratio` for the effective values.
+- **Compound duration is enforced.** Inner content is trimmed to the compound's `duration` when
+  flattened (previously ignored). Compounds shorter than their content will now be cut.
+- **Exposed parameters fail loudly.** A parameter targeting a missing clip or property, or a
+  protected field (`id`, `clip_type`, ...), raises `TemplateParameterError` at export. `set_parameter`
+  with an unknown name raises too.
+- **`flatten()` never mutates the source timeline** (it used to bake parameter defaults into your template).
+- **Text size is relative to a 1080p reference frame** (`font_size=48` is 48px at 1080p) and scales
+  with export resolution. Previously the same clip was 3x larger relative to the frame at 360p.
+- **Stricter validation:** `Variable` values are coerced/validated by type; `TextStyle` color/weight/font
+  are validated; `Transform.scale`/`zoom` must be > 0; `MediaClip.resolution` must be positive;
+  `Time` rejects `bool`, `inf`, `nan` and values above `MAX_TIME_SECONDS` (10^9) with `InvalidTimeError`.
+- **`Timeline.add_clip` rejects duplicate clip ids** (also within one call) and no longer creates
+  tracks of the other kind (a video-only add used to create empty audio tracks).
+- `CodedVisualClip.invalidate_compile()` is now public (the old `_invalidate_compile` remains as an alias).
+
+### Coded visuals (`coded_visual/`)
+
+- **Animated rendering rewritten.** The old renderer launched one Chrome per frame and did not finish
+  a 2-second clip in over 5 minutes here. It now uses a single browser session, a virtual clock for
+  `Date`/timers/`requestAnimationFrame`, and seeks CSS/Web Animations, streaming frames to FFmpeg
+  (2s@30fps in ~4s; measured 0/320/640/960/1216 px of a 1280px sweep at 0/.5/1/1.5/1.9s). Needs the
+  optional `visualkit[render]` extra. Still visuals need only Chrome.
+- **Scale-to-fit.** Content in `.visualkit-canvas` is rendered at its design size and scaled with
+  aspect ratio preserved; verified in four viewport shapes.
+- **Safe variable injection.** `{{ x }}` is HTML-escaped (`{{{ x }}}` is raw); values reach script
+  as JSON that cannot close the `<script>` block; backslashes in values no longer crash substitution.
+- **Correct CSS/`<head>` handling:** `aspect-ratio: 9 / 16` (was invalid `9:16`); `<head lang>`, `<HEAD>`
+  and head-less documents now receive the injection. Meta tags are parsed with a real HTML parser and
+  malformed values raise `CodedVisualError` instead of silently falling back.
+- **Content-addressed cache** covering the HTML, every variable, canvas, fps, duration, render mode
+  and the bytes of sibling assets, so no edit can serve a stale render.
+- **Browser discovery** (`VISUALKIT_CHROME`, `PATH`, standard and Playwright/Puppeteer locations),
+  automatic `--no-sandbox` in containers/root, timeouts, and Chrome's stderr in errors.
+- **Manifest-declared variables and `animated` flag** are honored; required variables are checked at compile.
+
+### Time and variables
+
+- Real SMPTE **drop-frame** timecode (exhaustively round-trip tested over 216,000 frames at 29.97).
+- **NTSC rates** (29.97, 23.976, 59.94) work as float or `Fraction` and are treated as their exact
+  1000/1001 rational rate. `from_timecode(fps=29.97)` used to raise `TypeError`.
+- `Variable`: fixed a `RecursionError` on string defaults; types enforced on construction and assignment.
+  Bare values keep their inferred type; a dict-valued variable is data, not mistaken for a spec.
+
+### Timeline
+
+- `split_clip`, `move_clip_track` and `add_clip` are **atomic** (a rejected edit, including a batch
+  that fails on its second clip or mid-ripple, leaves the timeline exactly as it was). Previously
+  a failed split left the track modified and a rejected move deleted the clip.
+- Compound clips and their companion audio stay together: `remove_clip` removes both, ripple/move
+  re-sync, and there is a new `Timeline.sync_companions()`.
+- Sorting and overlap checks use exact `Fraction` arithmetic instead of float seconds.
+- A compound that contains its own timeline is rejected (`add_clip`) or reported (`flatten`), not infinitely recursed.
+
+### Pipeline and exporters
+
+- Flattening composes a compound's `transform` onto its children (`compose_transforms`), clips content to
+  the compound's span, and no longer mutates the source.
+- **Video export:** rotated clips were cropped back to their pre-rotation box (a 90-degree turn lost 44% of
+  the picture) and are now sized to the rotated bounding box; text honors all of `TextStyle`; the text
+  cache is keyed by content (was clip id, which served stale text); failures raise `ExportError` with
+  FFmpeg's output; output is written atomically.
+- **DaVinci Resolve:** exact NTSC frame math (1h @ 29.97 = 107,892 frames, was 108,000); XMEML
+  positions normalized by sequence size; each media file declared once and referenced after; FCPXML
+  times are frame-aligned rationals; the previously undeclared `basic-title` effect is declared;
+  identity transforms emit no motion filters.
+
+### Packaging and docs
+
+- `py.typed` shipped; `__version__`; `render` extra; full project metadata; `asyncio_mode` configured;
+  `ruff` target fixed to py312; new exception types exported from the top level.
+- README rewritten for the actual behavior; `examples/02` now uses a bundle with a manifest, typed
+  variables and a local SVG (renders and was inspected frame by frame).
+
+### Known limitations / not verified
+
+- **Resolve position conventions are unverified against a live DaVinci Resolve import** (XMEML
+  normalized center; FCPXML percent-of-height with y up). Covered by structural tests only.
+- Full Chrome hung in the review sandbox, so rendering was verified with `chrome-headless-shell` /
+  Playwright's Chromium. Other browsers/platforms (Windows, macOS) were not exercised.
+- Time-dependent web content beyond CSS/Web Animations and JS timers is not made deterministic.
+- Not audited in depth: `AssetResolver`, `Time` arithmetic operators, and FFmpeg handling of
+  speed changes across many audio tracks beyond the existing tests.
+
+---
+
+# Earlier review (first pass)
 
 This document summarizes every bug found and fixed during a full review of
 the codebase, in the order they were made. The library's own git history

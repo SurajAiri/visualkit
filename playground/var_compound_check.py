@@ -50,9 +50,7 @@ print("Default resolved variables:", infographic.get_resolved_variables())
 
 print("\n=== 2. Compound Clip with Parameter Mappings for AI Agents ===")
 inner_timeline = Timeline()
-inner_timeline.add_clip(
-    TextClip(id="intro_subtitle", text="Monthly Report", duration=Time.from_seconds(5))
-)
+inner_timeline.add_clip(TextClip(id="intro_subtitle", text="Monthly Report", duration=Time.from_seconds(5)))
 inner_timeline.add_clip(infographic)
 
 template_clip = CompoundClip(
@@ -107,4 +105,6 @@ print(f"Chart variables: {updated_chart.get_resolved_variables()}")
 print("\n--- Round-trip JSON Serialization ---")
 serialized = template_clip.model_dump_json(indent=2)
 restored = CompoundClip.model_validate_json(serialized)
-print(f"Successfully serialized and restored CompoundClip '{restored.id}' with {len(restored.exposed_parameters)} exposed parameters.")
+print(
+    f"Successfully serialized and restored CompoundClip '{restored.id}' with {len(restored.exposed_parameters)} exposed parameters."
+)

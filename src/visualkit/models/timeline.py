@@ -44,6 +44,24 @@ def _speed_fraction(speed: float) -> Fraction:
     return Fraction(speed).limit_denominator(_SPEED_DENOMINATOR_LIMIT)
 
 
+def _start_key(clip: Any) -> Fraction:
+    """Exact sort key for a clip's start (never a lossy float)."""
+    return clip.timeline_start.value
+
+
+def _overlap_errors(clips: list[Any]) -> list[str]:
+    """Overlap errors for an arbitrary list of clips (exact arithmetic), without needing a Track."""
+    errors: list[str] = []
+    ordered = sorted(clips, key=_start_key)
+    for prev, cur in zip(ordered, ordered[1:]):
+        prev_end = prev.timeline_start + prev.duration
+        if cur.timeline_start < prev_end:
+            errors.append(
+                f"clip {cur.id} starts at {cur.timeline_start}, before clip {prev.id} ends at {prev_end}"
+            )
+    return errors
+
+
 def _remap_compound_inner_ids(compound: CompoundClip) -> None:
     """Give every clip inside `compound.inner_timeline` a fresh id, and
     update `exposed_parameters[i].target_clip_id` references to match.
@@ -169,7 +187,7 @@ class Track(VisualKitModel, Generic[TClip]):
                 )
 
         self.clips.append(clip)
-        self.clips.sort(key=lambda c: c.timeline_start.seconds)
+        self.clips.sort(key=_start_key)
 
         if validate and mode == InsertMode.RIPPLE:
             errors = self.validate_clips()
@@ -219,15 +237,14 @@ class Track(VisualKitModel, Generic[TClip]):
         return conflicts
 
     def validate_clips(self) -> list[str]:
-        """Ensures clips on this track do not overlap in time."""
+        """Ensures clips on this track do not overlap in time (exact arithmetic)."""
         errors: list[str] = []
-        ordered = sorted(self.clips, key=lambda c: c.timeline_start.seconds)
+        ordered = sorted(self.clips, key=_start_key)
         for prev, cur in zip(ordered, ordered[1:]):
-            prev_end = prev.timeline_start.seconds + prev.duration.seconds
-            if cur.timeline_start.seconds < prev_end:
+            prev_end = prev.timeline_start + prev.duration
+            if cur.timeline_start < prev_end:
                 errors.append(
-                    f"clip {cur.id} starts at {cur.timeline_start.seconds}s, "
-                    f"before clip {prev.id} ends at {prev_end}s"
+                    f"clip {cur.id} starts at {cur.timeline_start}, before clip {prev.id} ends at {prev_end}"
                 )
         return errors
 
@@ -285,36 +302,40 @@ class Track(VisualKitModel, Generic[TClip]):
             )
 
         delta = Time(at_time.value - start.value)  # positive by the bounds check above
+        first_duration = delta
 
-        first = clip
+        # Build the second half from a copy; the live clip is not touched until
+        # every check has passed, so a rejected split leaves it unchanged.
         second = clip.model_copy(deep=True)
         second.id = f"clip_{uuid.uuid4().hex[:8]}"
         second.timeline_start = at_time
         second.duration = Time(end.value - at_time.value)
-
-        first.duration = delta
-
         if hasattr(second, "source"):
             second.source.start = Time(second.source.start.value + delta.value * _speed_fraction(clip.speed))
 
-        for half in (first, second):
-            if isinstance(half, CodedVisualClip) and half.compile_status == CompileStatus.READY:
-                half.media_source = None
-                half.compile_status = CompileStatus.PENDING
-
-        if hasattr(first, "linked_clip_id"):
-            first.linked_clip_id = second.id
-            second.linked_clip_id = first.id
-
-        self.clips.append(second)
-        self.clips.sort(key=lambda c: c.timeline_start.seconds)
+        stale_render = isinstance(clip, CodedVisualClip) and clip.compile_status == CompileStatus.READY
+        if isinstance(second, CodedVisualClip) and stale_render:
+            second.media_source = None
+            second.compile_status = CompileStatus.PENDING
 
         if validate:
-            errors = self.validate_clips()
+            first_preview = clip.model_copy(update={"duration": first_duration})
+            preview = [c for c in self.clips if c is not clip] + [first_preview, second]
+            errors = _overlap_errors(preview)
             if errors:
                 raise TimelineValidationError("; ".join(errors))
 
-        return first, second
+        # ---- commit (nothing below can raise) ----
+        clip.duration = first_duration
+        if stale_render:
+            clip.media_source = None
+            clip.compile_status = CompileStatus.PENDING
+        if hasattr(clip, "linked_clip_id"):
+            clip.linked_clip_id = second.id
+            second.linked_clip_id = clip.id
+        self.clips.append(second)
+        self.clips.sort(key=_start_key)
+        return clip, second
 
     def trim_in(self, clip_id: str, new_in: Time, *, validate: bool = True) -> TClip:
         """Move a clip's head to `new_in`, an absolute timeline position.
@@ -455,7 +476,7 @@ class Track(VisualKitModel, Generic[TClip]):
             if existing.timeline_start >= removed_end:
                 existing.timeline_start = Time(existing.timeline_start.value - removed_duration_value)
 
-        self.clips.sort(key=lambda c: c.timeline_start.seconds)
+        self.clips.sort(key=_start_key)
 
         if validate:
             errors = self.validate_clips()
@@ -609,29 +630,105 @@ class Timeline(VisualKitModel):
         through to each underlying `Track.add_clip` call -- see its
         docstring for what it checks in OVERLAP vs RIPPLE mode.
         """
-        # handling track index
         if track_index < 0:
             raise ValueError("track_index must be non-negative")
 
-        while len(self.video_tracks) <= track_index:
-            self.add_video_track()
-        while len(self.audio_tracks) <= track_index:
-            self.add_audio_track()
+        # Validate the whole batch before touching anything. Every id-based operation
+        # (get_clip, split, trim, ...) assumes ids are unique across the timeline, so a
+        # duplicate is refused -- including two clips within this same call.
+        batch_ids: set[str] = set()
+        for clip in clips:
+            if clip.id in batch_ids or self.get_clip(clip.id)[1] is not None:
+                raise TimelineValidationError(
+                    f"Cannot add clip: a clip with id '{clip.id}' already exists on this timeline."
+                )
+            batch_ids.add(clip.id)
+            if isinstance(clip, CompoundClip) and clip.inner_timeline is not None:
+                self._ensure_no_cycle(clip)
 
+        # All-or-nothing: if any clip in the batch is rejected (overlap validation, a
+        # ripple conflict, ...) the timeline is restored exactly, so a failed call never
+        # leaves the earlier clips of the batch behind.
+        snapshot = self._snapshot(clips)
+        try:
+            self._add_clips(clips, track_index, mode, validate)
+        except BaseException:
+            self._restore(snapshot)
+            raise
+
+    def _add_clips(self, clips: tuple[Clip, ...], track_index: int, mode: InsertMode, validate: bool) -> None:
         video_track_index = track_index
         audio_track_index = track_index
 
         for clip in clips:
             if clip.clip_type in ("media", "text", "coded_visual", "compound"):
-                self.video_tracks[video_track_index].add_clip(clip, mode=mode, validate=validate)
-
-                # If compound clip, auto-create and route companion to audio lane
-                if isinstance(clip, CompoundClip):
+                self._ensure_tracks("video", video_track_index)
+                is_compound = isinstance(clip, CompoundClip)
+                if is_compound:
+                    # A compound also occupies a seat on the audio lane.
+                    self._ensure_tracks("audio", audio_track_index)
                     companion = clip.create_audio_companion()
+                    if self.get_clip(companion.id)[1] is not None:
+                        raise TimelineValidationError(f"Companion id '{companion.id}' is already in use.")
+                self.video_tracks[video_track_index].add_clip(clip, mode=mode, validate=validate)
+                if is_compound:
                     self.audio_tracks[audio_track_index].add_clip(companion, mode=mode, validate=validate)
+                if mode == InsertMode.RIPPLE:
+                    self.sync_companions()
 
             elif clip.clip_type in ("audio", "compound_audio"):
+                self._ensure_tracks("audio", audio_track_index)
                 self.audio_tracks[audio_track_index].add_clip(clip, mode=mode, validate=validate)
+
+    def _snapshot(self, incoming: tuple[Clip, ...]) -> dict[str, Any]:
+        """Capture everything an add can change: track lists, clip order, and clip timing."""
+        tracks = [*self.video_tracks, *self.audio_tracks]
+        clips = [c for t in tracks for c in t.clips]
+        return {
+            "video_tracks": list(self.video_tracks),
+            "audio_tracks": list(self.audio_tracks),
+            "orders": [(t, list(t.clips)) for t in tracks],
+            "timing": [(c, c.timeline_start, c.duration, c.speed) for c in clips],
+            "links": [(c, c.linked_clip_id) for c in incoming if hasattr(c, "linked_clip_id")],
+        }
+
+    def _restore(self, snap: dict[str, Any]) -> None:
+        # In-place slice assignment keeps list identity and avoids re-validating clips.
+        self.video_tracks[:] = snap["video_tracks"]
+        self.audio_tracks[:] = snap["audio_tracks"]
+        for track, order in snap["orders"]:
+            track.clips[:] = order
+        for clip, start, duration, speed in snap["timing"]:
+            clip.timeline_start, clip.duration, clip.speed = start, duration, speed
+        for clip, link in snap["links"]:
+            clip.linked_clip_id = link
+
+    def _ensure_tracks(self, kind: str, index: int) -> None:
+        """Provision tracks of `kind` up to and including `index`. Never creates the other kind."""
+        if kind == "video":
+            while len(self.video_tracks) <= index:
+                self.add_video_track()
+        else:
+            while len(self.audio_tracks) <= index:
+                self.add_audio_track()
+
+    def _ensure_no_cycle(self, compound: CompoundClip) -> None:
+        """Reject adding a compound whose inner_timeline is (or contains) this timeline."""
+        stack = [compound.inner_timeline]
+        seen: set[int] = set()
+        while stack:
+            tl = stack.pop()
+            if tl is None or id(tl) in seen:
+                continue
+            seen.add(id(tl))
+            if tl is self:
+                raise TimelineValidationError(
+                    f"CompoundClip '{compound.id}' cannot contain the timeline it is being added to."
+                )
+            for track in tl.video_tracks:
+                for child in track.clips:
+                    if isinstance(child, CompoundClip):
+                        stack.append(child.inner_timeline)
 
     def get_clip(self, clip_id: str) -> tuple[Track, Any] | tuple[None, None]:
         """Find a clip and its containing track by clip ID."""
@@ -658,11 +755,50 @@ class Timeline(VisualKitModel):
         return results
 
     def remove_clip(self, clip_id: str) -> bool:
-        """Remove a clip from whichever track owns it."""
-        for track in self.all_tracks:
-            if track.remove_clip(clip_id):
-                return True
-        return False
+        """Remove a clip from whichever track owns it.
+
+        Removing a CompoundClip also removes its linked CompoundAudioClip
+        companion (otherwise it would be left behind as an orphan that plays
+        nothing but still occupies the audio lane).
+        """
+        track, clip = self.get_clip(clip_id)
+        if track is None or clip is None:
+            return False
+        companion_id = clip.linked_clip_id if isinstance(clip, CompoundClip) else None
+        track.remove_clip(clip_id)
+        if companion_id:
+            companion_track, companion = self.get_clip(companion_id)
+            if companion_track is not None and companion is not None:
+                companion_track.remove_clip(companion_id)
+        return True
+
+    def sync_companions(self) -> int:
+        """Re-align every CompoundAudioClip with its CompoundClip (start, duration, speed).
+
+        A companion is a *derived* clip: its timing must always mirror its
+        compound's. Call this after editing a compound's `timeline_start`,
+        `duration` or `speed` directly (the Timeline editing methods already do).
+        Returns the number of companions that were changed.
+        """
+        changed = 0
+        for track in self.video_tracks:
+            for clip in track.clips:
+                if not isinstance(clip, CompoundClip) or not clip.linked_clip_id:
+                    continue
+                companion_track, companion = self.get_clip(clip.linked_clip_id)
+                if companion is None or not isinstance(companion, CompoundAudioClip):
+                    continue
+                if (
+                    companion.timeline_start != clip.timeline_start
+                    or companion.duration != clip.duration
+                    or companion.speed != clip.speed
+                ):
+                    companion.timeline_start = clip.timeline_start
+                    companion.duration = clip.duration
+                    companion.speed = clip.speed
+                    companion_track.clips.sort(key=_start_key)
+                    changed += 1
+        return changed
 
     def move_clip_track(
         self,
@@ -693,8 +829,17 @@ class Timeline(VisualKitModel):
         if isinstance(dest_track, AudioTrack) and not isinstance(src_track, AudioTrack):
             raise TypeError("Cannot move visual clip into an AudioTrack.")
 
-        src_track.remove_clip(clip_id)
+        if dest_track is src_track:
+            # Moving to the same track is a no-op (removing then re-adding could
+            # otherwise conflict with the clip's own former position).
+            return True
+
+        # add_clip validates *before* mutating (OVERLAP) or raises before shifting
+        # (RIPPLE), so if the destination rejects the clip the source is untouched.
+        # Only after it has been accepted do we remove it from the source.
         dest_track.add_clip(clip, mode=mode, validate=validate)
+        src_track.remove_clip(clip_id)
+        self.sync_companions()
         return True
 
     def split_clip(self, clip_id: str, at_time: Time, *, validate: bool = True) -> tuple[Clip, Clip]:
@@ -826,10 +971,18 @@ class Timeline(VisualKitModel):
                     latest = clip_end
         return latest
 
-    def flatten(self, force_compile: bool = False, render_video: bool = False) -> Timeline:
+    def flatten(self, force_compile: bool = False, render_video: bool | None = None) -> Timeline:
         """Resolve variables, compile coded visuals, and flatten all compound clips
+        into a concrete Timeline that contains only media, text and audio clips.
 
-        into a concrete Timeline.
+        The timeline you call this on is never modified.
+
+        Args:
+            force_compile: Re-render coded visuals even if a cached render exists.
+            render_video: How coded visuals become media. ``None`` (default) decides per
+                clip: a visual with motion becomes a video, a static one a PNG. ``True``
+                forces video and ``False`` forces a still image, overriding each clip's
+                own ``render_mode``.
         """
         from visualkit.engine.pipeline import TimelinePipeline
 
@@ -846,7 +999,7 @@ class Timeline(VisualKitModel):
         resolution: tuple[int, int] = (1920, 1080),
         project_name: str = "VisualKit Project",
         sequence_name: str = "VisualKit Sequence",
-        render_video: bool = False,
+        render_video: bool | None = None,
         asset_resolver: Any = None,
         **kwargs: Any,
     ) -> Any:

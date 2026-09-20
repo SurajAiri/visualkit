@@ -1,26 +1,89 @@
+"""Compiling a `CodedVisualClip` into a concrete media file.
+
+Pipeline::
+
+    HTML/CSS/JS + variables  --prepare-->  self-contained page
+    page  --headless Chrome-->  PNG (still)  |  frames -> ffmpeg -> video
+
+The compiler is *pure with respect to its inputs*: the output location is a
+content hash of everything that affects the pixels (the source HTML, every
+resolved variable, canvas, fps, duration, render mode, and the bytes of
+files in a bundle directory), so a change to any of them can never serve a
+stale render, however it was made.
+"""
+
+from __future__ import annotations
+
 import hashlib
+import html as html_lib
 import json
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
+from visualkit.coded_visual import browser
 from visualkit.coded_visual.project import load_coded_visual
 from visualkit.models.clips.base import Size
-from visualkit.models.clips.coded_visual import CodedVisualClip, CompileStatus
+from visualkit.models.clips.coded_visual import (
+    CodedVisualClip,
+    CompileStatus,
+    RenderMode,
+    aspect_ratio_for,
+    parse_aspect_ratio,
+)
+from visualkit.utils.exceptions import CodedVisualCompileError
+
+_PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][\w.\-]*)\s*\}\}")
+_RAW_PLACEHOLDER = re.compile(r"\{\{\{\s*([A-Za-z_][\w.\-]*)\s*\}\}\}")
+_HEAD_OPEN = re.compile(r"<head(\s[^>]*)?>", re.IGNORECASE)
+_HTML_OPEN = re.compile(r"<html(\s[^>]*)?>", re.IGNORECASE)
+_STILL_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
+
+# Files inside a bundle that affect rendering; hashed into the cache key.
+_BUNDLE_HASH_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def _json_for_script(value: Any) -> str:
+    """JSON safe to embed inside an inline <script> (cannot terminate the tag or the string)."""
+    text = json.dumps(value, default=str, ensure_ascii=False, sort_keys=True)
+    return (
+        text.replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def _stringify(value: Any) -> str:
+    """How a variable renders inside HTML text/attribute content."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 class CodedVisualCompiler:
-    """Compiles CodedVisualClip projects into prepared, variable-injected HTML bundles
+    """Renders `CodedVisualClip`s to PNG (still) or video (animated) media."""
 
-    ready for rendering and headless capture.
-    Handles aspect ratio preservation, relative asset resolution, and deterministic caching.
-    """
-
-    def __init__(self, cache_dir: str | Path | None = None):
+    def __init__(
+        self,
+        cache_dir: str | Path | None = None,
+        *,
+        render_timeout: float = 120.0,
+        ffmpeg: str = "ffmpeg",
+    ):
         self.cache_dir = Path(cache_dir or Path(".visualkit_cache/coded_visuals")).resolve()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.render_timeout = render_timeout
+        self.ffmpeg = ffmpeg
 
+    # ------------------------------------------------------------------ cache key
     @staticmethod
     def compute_cache_key(
         source_content: str,
@@ -29,18 +92,50 @@ class CodedVisualCompiler:
         aspect_ratio: str,
         fps: float,
         duration: float,
+        *,
+        render_mode: str = "auto",
+        bundle_digest: str = "",
     ) -> str:
-        """Generate a deterministic SHA256 hash representing the exact render state."""
+        """Deterministic SHA-256 over everything that can change the rendered pixels."""
         hasher = hashlib.sha256()
         hasher.update(source_content.encode("utf-8"))
-        # Sort keys for deterministic JSON representation
-        sorted_vars = json.dumps(variables, sort_keys=True)
-        hasher.update(sorted_vars.encode("utf-8"))
-        hasher.update(f"{canvas_size.width}x{canvas_size.height}".encode("utf-8"))
-        hasher.update(aspect_ratio.encode("utf-8"))
-        hasher.update(f"{fps}:{duration}".encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(_json_for_script(variables).encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(
+            f"{canvas_size.width:g}x{canvas_size.height:g}|{aspect_ratio}|{fps:g}|{duration:g}".encode()
+        )
+        hasher.update(f"|{render_mode}|{bundle_digest}".encode())
         return hasher.hexdigest()
 
+    @staticmethod
+    def _bundle_digest(entrypoint: Path) -> str:
+        """Hash the *other* files in a bundle dir (css, js, images) so editing one busts the cache.
+
+        A single-file visual (no sibling assets) hashes to "". Files over the
+        size limit are hashed by (name, size, mtime) instead of content.
+        """
+        root = entrypoint.parent
+        hasher = hashlib.sha256()
+        total = 0
+        found = False
+        for path in sorted(root.rglob("*")):
+            if not path.is_file() or path == entrypoint or path.suffix in {".pyc"}:
+                continue
+            if any(part.startswith(".") for part in path.relative_to(root).parts):
+                continue
+            found = True
+            rel = path.relative_to(root).as_posix()
+            stat = path.stat()
+            hasher.update(rel.encode())
+            if total + stat.st_size <= _BUNDLE_HASH_LIMIT_BYTES:
+                total += stat.st_size
+                hasher.update(path.read_bytes())
+            else:
+                hasher.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+        return hasher.hexdigest() if found else ""
+
+    # ------------------------------------------------------------------ HTML preparation
     @staticmethod
     def prepare_html(
         raw_html: str,
@@ -48,320 +143,296 @@ class CodedVisualCompiler:
         canvas_size: Size,
         aspect_ratio: str,
         base_dir: Path | None = None,
+        *,
+        scale_to_fit: bool = True,
     ) -> str:
-        """Inject variables, base href for relative assets, and viewport styling to preserve aspect ratio."""
-        prepared = raw_html
+        """Inject variables and design-canvas handling into a visual's HTML.
 
-        # 1. Substitute Jinja-like {{ variable_name }} placeholders
-        for var_name, val in variables.items():
-            pattern = re.compile(r"\{\{\s*" + re.escape(var_name) + r"\s*\}\}")
-            prepared = pattern.sub(str(val), prepared)
-
-        # 2. Build injection script & style blocks
-        vars_json = json.dumps(variables, indent=2)
-        injected_script = f"""
-        <script id="visualkit-variables">
-            window.__VARIABLES__ = {vars_json};
-            window.VISUALKIT_PARAMS = window.__VARIABLES__;
-        </script>
+        * ``{{ name }}`` is replaced by the **HTML-escaped** value, so a
+          variable can never inject markup. Use ``{{{ name }}}`` (triple
+          braces) to opt in to raw, unescaped HTML for a trusted variable.
+        * Values are inserted literally (no regex-backreference surprises
+          from things like ``C:\\new\\1``).
+        * ``window.__VARIABLES__`` / ``window.VISUALKIT_PARAMS`` carry the
+          same values to JavaScript, JSON-escaped so they cannot close the
+          ``<script>`` block.
+        * The page is locked to the design canvas: a ``.visualkit-canvas``
+          box of exactly ``canvas_size``, with a ``--vk-scale`` factor so a
+          viewport of any size shows it scaled (aspect preserved) rather
+          than reflowed.
         """
+        w, h = int(canvas_size.width), int(canvas_size.height)
+        ratio_w, ratio_h = parse_aspect_ratio(aspect_ratio)
 
-        # Container styling that locks native design aspect ratio and canvas bounds
-        injected_style = f"""
-        <style id="visualkit-viewport-style">
-            html, body {{
-                margin: 0;
-                padding: 0;
-                width: 100%;
-                height: 100%;
-                overflow: hidden;
-                background-color: transparent;
-            }}
-            .visualkit-canvas {{
-                width: {int(canvas_size.width)}px;
-                height: {int(canvas_size.height)}px;
-                aspect-ratio: {aspect_ratio};
-                box-sizing: border-box;
-                position: relative;
-                overflow: hidden;
-            }}
-        </style>
-        """
+        def raw_sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            return _stringify(variables[name]) if name in variables else match.group(0)
+
+        def esc_sub(match: re.Match[str]) -> str:
+            name = match.group(1)
+            return (
+                html_lib.escape(_stringify(variables[name]), quote=True)
+                if name in variables
+                else match.group(0)
+            )
+
+        # Triple-brace first so the double-brace pattern can't half-match it.
+        prepared = _RAW_PLACEHOLDER.sub(raw_sub, raw_html)
+        prepared = _PLACEHOLDER.sub(esc_sub, prepared)
+
+        vars_json = _json_for_script(variables)
+        injected_script = (
+            '<script id="visualkit-variables">\n'
+            f"window.__VARIABLES__ = {vars_json};\n"
+            "window.VISUALKIT_PARAMS = window.__VARIABLES__;\n"
+            f"window.VISUALKIT_CANVAS = {{width: {w}, height: {h}}};\n"
+            "</script>"
+        )
+
+        fit_css = ""
+        fit_script = ""
+        if scale_to_fit:
+            # The canvas keeps its design pixel size; a single transform scales it to the
+            # viewport (contain-fit, centred). Layout inside never reflows.
+            fit_css = (
+                f".visualkit-canvas {{ position: absolute; left: 50%; top: 50%; width: {w}px; height: {h}px;"
+                " transform-origin: center center;"
+                " transform: translate(-50%, -50%) scale(var(--vk-scale, 1)); }"
+            )
+            fit_script = (
+                '<script id="visualkit-fit">\n'
+                "(function(){\n"
+                f"  var W={w}, H={h};\n"
+                "  function fit(){\n"
+                "    var s = Math.min(window.innerWidth / W, window.innerHeight / H);\n"
+                "    document.documentElement.style.setProperty('--vk-scale', String(s));\n"
+                "  }\n"
+                "  fit(); window.addEventListener('resize', fit);\n"
+                "})();\n"
+                "</script>"
+            )
+        injected_style = (
+            '<style id="visualkit-viewport-style">\n'
+            "html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;"
+            " background-color: transparent; }\n"
+            ".visualkit-canvas { box-sizing: border-box; overflow: hidden;"
+            f" aspect-ratio: {ratio_w:g} / {ratio_h:g}; }}\n"
+            f"{fit_css}\n"
+            "</style>"
+        )
 
         base_tag = ""
-        if base_dir:
-            base_url = base_dir.as_uri() + "/"
-            base_tag = f'<base href="{base_url}">\n'
+        if base_dir is not None:
+            base_tag = (
+                f'<base href="{html_lib.escape(base_dir.resolve().as_uri().rstrip("/") + "/", quote=True)}">'
+            )
 
-        injection = f"{base_tag}\n{injected_style}\n{injected_script}"
+        injection = "\n".join(
+            part for part in (base_tag, injected_style, injected_script, fit_script) if part
+        )
 
-        # Inject into <head> if present, otherwise prepend to the document
-        if "<head>" in prepared:
-            prepared = prepared.replace("<head>", f"<head>\n{injection}", 1)
-        elif "<html>" in prepared:
-            prepared = prepared.replace("<html>", f"<html><head>\n{injection}</head>", 1)
+        head = _HEAD_OPEN.search(prepared)
+        if head:
+            prepared = prepared[: head.end()] + "\n" + injection + prepared[head.end() :]
         else:
-            prepared = f"<head>\n{injection}</head>\n{prepared}"
-
+            html_tag = _HTML_OPEN.search(prepared)
+            if html_tag:
+                prepared = (
+                    prepared[: html_tag.end()] + f"<head>\n{injection}\n</head>" + prepared[html_tag.end() :]
+                )
+            else:
+                prepared = f"<head>\n{injection}\n</head>\n{prepared}"
         return prepared
 
-    def prepare_bundle(self, clip: CodedVisualClip) -> tuple[Path, str]:
-        """Prepares a standalone, runnable HTML bundle directory for this clip.
-
-        Returns (entrypoint_file_path, cache_key)
-        """
+    # ------------------------------------------------------------------ resolved inputs
+    def _resolve_inputs(self, clip: CodedVisualClip) -> dict[str, Any]:
+        """Merge clip settings with the visual's manifest; clip settings win."""
         source_ref = clip.source.source
-        entrypoint_path, manifest, raw_html = load_coded_visual(source_ref)
+        try:
+            entrypoint, manifest, raw_html = load_coded_visual(source_ref)
+        except FileNotFoundError as err:
+            raise CodedVisualCompileError(f"Coded visual source not found: {source_ref}") from err
 
-        # Merge clip properties with manifest
-        canvas_size = clip.canvas_size or manifest.canvas_size
-        aspect_ratio = clip.aspect_ratio or manifest.aspect_ratio
-        duration = clip.duration.seconds if clip.duration else (manifest.duration or 5.0)
-        fps = clip.fps or manifest.fps or 30.0
+        if clip.canvas_size is not None:
+            canvas = clip.canvas_size
+        else:
+            canvas = manifest.canvas_size
+        if clip.aspect_ratio is not None:
+            aspect = clip.aspect_ratio
+        elif manifest.aspect_ratio and clip.canvas_size is None:
+            aspect = manifest.aspect_ratio
+        else:
+            aspect = aspect_ratio_for(canvas.width, canvas.height)
 
-        # Combine clip variables with manifest defaults
-        resolved_vars = clip.get_resolved_variables()
-        for k, v in manifest.variables.items():
-            if k not in resolved_vars:
-                resolved_vars[k] = v.resolve_value()
+        duration = clip.duration.seconds if clip.duration.seconds > 0 else (manifest.duration or 5.0)
+        fps = clip.fps if "fps" in clip.model_fields_set else (manifest.fps or clip.fps)
 
+        variables = clip.get_resolved_variables()
+        for name, var in manifest.variables.items():
+            if name not in variables:
+                variables[name] = var.resolve_value()
+        missing = [
+            n
+            for n, v in {**manifest.variables, **clip.variables}.items()
+            if v.required and variables.get(n) is None
+        ]
+        if missing:
+            raise CodedVisualCompileError(
+                f"CodedVisualClip '{clip.id}' is missing required variable(s): {', '.join(sorted(missing))}"
+            )
+
+        return {
+            "entrypoint": entrypoint,
+            "manifest": manifest,
+            "raw_html": raw_html,
+            "canvas": canvas,
+            "aspect": aspect,
+            "duration": duration,
+            "fps": fps,
+            "variables": variables,
+        }
+
+    def prepare_bundle(self, clip: CodedVisualClip) -> tuple[Path, str]:
+        """Write the prepared, variable-injected page for `clip`. Returns ``(html_path, cache_key)``."""
+        info = self._resolve_inputs(clip)
+        return self._write_bundle(clip, info)
+
+    def _write_bundle(self, clip: CodedVisualClip, info: dict[str, Any]) -> tuple[Path, str]:
         cache_key = self.compute_cache_key(
-            source_content=raw_html,
-            variables=resolved_vars,
-            canvas_size=canvas_size,
-            aspect_ratio=aspect_ratio,
-            fps=fps,
-            duration=duration,
+            source_content=info["raw_html"],
+            variables=info["variables"],
+            canvas_size=info["canvas"],
+            aspect_ratio=info["aspect"],
+            fps=info["fps"],
+            duration=info["duration"],
+            render_mode=clip.render_mode.value,
+            bundle_digest=self._bundle_digest(info["entrypoint"]),
         )
-
-        clip_bundle_dir = self.cache_dir / cache_key
-        clip_bundle_dir.mkdir(parents=True, exist_ok=True)
-        target_html = clip_bundle_dir / "index.html"
-
-        # Base directory for relative asset resolution (images, fonts, scripts)
-        base_dir = entrypoint_path.parent
-
-        prepared_html = self.prepare_html(
-            raw_html=raw_html,
-            variables=resolved_vars,
-            canvas_size=canvas_size,
-            aspect_ratio=aspect_ratio,
-            base_dir=base_dir,
+        bundle_dir = self.cache_dir / cache_key
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        target_html = bundle_dir / "index.html"
+        target_html.write_text(
+            self.prepare_html(
+                raw_html=info["raw_html"],
+                variables=info["variables"],
+                canvas_size=info["canvas"],
+                aspect_ratio=info["aspect"],
+                base_dir=info["entrypoint"].parent,
+                scale_to_fit=clip.auto_scale,
+            ),
+            encoding="utf-8",
         )
-
-        with open(target_html, "w", encoding="utf-8") as f:
-            f.write(prepared_html)
-
         return target_html, cache_key
 
+    # ------------------------------------------------------------------ rendering
     @staticmethod
     def _find_chrome_executable() -> str | None:
-        """Locate Google Chrome or Chromium executable on the system."""
-        import shutil
+        """Kept for backwards compatibility; see `visualkit.coded_visual.browser.find_chrome`."""
+        return browser.find_chrome()
 
-        # Common macOS paths
-        mac_paths = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ]
-        for p in mac_paths:
-            if Path(p).exists():
-                return p
-
-        # Search in PATH (Linux / Windows / customized environments)
-        for bin_name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
-            found = shutil.which(bin_name)
-            if found:
-                return found
-        return None
+    def render_to_image(self, clip: CodedVisualClip, *, force: bool = False) -> Path:
+        """Render `clip` to a single PNG at its design size and record it as the clip's media."""
+        info = self._resolve_inputs(clip)
+        target_html, cache_key = self._write_bundle(clip, info)
+        out = target_html.parent / "render.png"
+        if force or not out.exists():
+            width, height = int(info["canvas"].width), int(info["canvas"].height)
+            browser.screenshot(target_html, out, width, height, timeout=self.render_timeout)
+        clip.media_source = str(out)
+        clip.compile_status = CompileStatus.READY
+        return out
 
     def render_to_video(
         self,
         clip: CodedVisualClip,
         output_path: str | Path | None = None,
-        fps: float = 30.0,
+        fps: float | None = None,
         force: bool = False,
     ) -> Path:
-        """Render the prepared HTML bundle into an actual MP4 video file using headless Chrome and FFmpeg."""
-        target_html, cache_key = self.prepare_bundle(clip)
+        """Render `clip`'s animation to a video file (see `visualkit.coded_visual.capture`)."""
+        from visualkit.coded_visual.capture import capture_video
+
+        info = self._resolve_inputs(clip)
+        target_html, cache_key = self._write_bundle(clip, info)
         bundle_dir = target_html.parent
-        # A caller-supplied `output_path` is not itself derived from
-        # `cache_key`, so its mere existence on disk doesn't prove it was
-        # rendered from the *current* variables/state -- it could be a
-        # stale file left over from a previous compile of this same clip
-        # at a literal path the caller reuses across renders. The
-        # actual cache hit/miss signal is whether *this* cache_key's own
-        # bundle_dir already has a rendered output; only reuse a
-        # caller-supplied output_path once that's confirmed, and copy
-        # from the verified cache rather than trusting the path directly.
-        default_out_file = bundle_dir / "render.mp4"
-        out_file = Path(output_path) if output_path else default_out_file
+        cached = bundle_dir / "render.mp4"
 
-        if not force and default_out_file.exists():
-            if out_file != default_out_file:
-                import shutil as _shutil
-
-                out_file.parent.mkdir(parents=True, exist_ok=True)
-                _shutil.copyfile(default_out_file, out_file)
-            clip.media_source = str(out_file)
-            clip.compile_status = CompileStatus.READY
-            return out_file
-
-        chrome_bin = self._find_chrome_executable()
-        if not chrome_bin:
-            raise RuntimeError(
-                "Cannot render coded visual to video: Google Chrome or Chromium not found on system."
+        if force or not cached.exists():
+            if shutil.which(self.ffmpeg) is None:
+                raise CodedVisualCompileError("ffmpeg was not found on PATH; it is required to encode video.")
+            capture_video(
+                html_path=target_html,
+                out_file=cached,
+                width=int(info["canvas"].width),
+                height=int(info["canvas"].height),
+                duration=info["duration"],
+                fps=fps or info["fps"],
+                ffmpeg=self.ffmpeg,
+                timeout=self.render_timeout,
             )
 
-        duration = clip.duration.seconds if clip.duration and clip.duration.seconds > 0 else 5.0
-        width = int(clip.canvas_size.width)
-        height = int(clip.canvas_size.height)
-
-        # Render to the cache_key-addressed default location first, so
-        # the cache-hit check above (keyed on cache_key, via
-        # default_out_file) is always meaningful regardless of what
-        # output_path the caller passes; then copy/symlink to the
-        # caller's requested path if different.
-        self._capture_animated_frames(
-            target_html=target_html,
-            chrome_bin=chrome_bin,
-            bundle_dir=bundle_dir,
-            width=width,
-            height=height,
-            duration=duration,
-            fps=fps,
-            out_file=default_out_file,
-        )
-
-        if out_file != default_out_file:
-            out_file.parent.mkdir(parents=True, exist_ok=True)
-            import shutil as _shutil
-
-            _shutil.copyfile(default_out_file, out_file)
-
-        clip.media_source = str(out_file)
+        out = cached
+        if output_path is not None:
+            out = Path(output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(cached, out)
+        clip.media_source = str(out)
         clip.compile_status = CompileStatus.READY
-        return out_file
+        return out
 
-    def _capture_animated_frames(
-        self,
-        *,
-        target_html: Path,
-        chrome_bin: str,
-        bundle_dir: Path,
-        width: int,
-        height: int,
-        duration: float,
-        fps: float,
-        out_file: Path,
-    ) -> None:
-        """Capture the coded visual's actual motion over `duration` and
-        encode it to `out_file`, instead of screenshotting a single
-        instant and looping that one still frame.
+    def is_animated(self, clip: CodedVisualClip) -> bool:
+        """Decide whether `clip` needs video (True) or a still image (False).
 
-        Previously this method took exactly one `--screenshot` and fed
-        it to ffmpeg with `-loop 1 -t duration`, so ANY animated HTML/CSS
-        (a CSS @keyframes animation, a JS-driven canvas, etc.) exported
-        as a frozen still for its entire duration -- there was no
-        mechanism to advance time and capture more than one instant.
-        This samples `capture_fps` frames evenly across `duration` by
-        reloading the page and waiting a computed delay (via Chrome's
-        `--virtual-time-budget`, which advances the page's own timers/
-        rAF/CSS-animation clock deterministically rather than relying on
-        real wall-clock time) before each screenshot, then stitches the
-        frame sequence into a video with ffmpeg at the timeline's `fps`.
-
-        Chrome's `--screenshot` flag itself only ever captures a single
-        frame per invocation, so one Chrome invocation per sampled frame
-        is unavoidable without a more involved CDP (Chrome DevTools
-        Protocol) screencast integration; `capture_fps` is deliberately
-        lower than typical output `fps` to keep render time reasonable,
-        and ffmpeg's own encoder duplicates frames to fill `fps` from
-        the sparser capture (motion still advances, just sampled less
-        finely than the final encode's frame rate).
+        Precedence: the clip's explicit ``render_mode``; the visual's own
+        ``animated`` manifest/meta flag; otherwise the page is rendered at
+        two different virtual times and the frames compared.
         """
-        frames_dir = bundle_dir / "frames"
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        for old_frame in frames_dir.glob("frame_*.png"):
-            old_frame.unlink()
+        if clip.render_mode == RenderMode.IMAGE:
+            return False
+        if clip.render_mode == RenderMode.VIDEO:
+            return True
+        info = self._resolve_inputs(clip)
+        declared = info["manifest"].animated
+        if declared is not None:
+            return declared
+        from visualkit.coded_visual.capture import detect_motion
 
-        # Cap the number of real Chrome launches: each sampled frame is
-        # one full headless-Chrome process invocation, so sampling at the
-        # full output fps for a long clip would be very slow. 12fps is
-        # enough to read most CSS/JS motion as animated rather than
-        # janky, while keeping a multi-second clip's render time bounded.
-        capture_fps = min(fps, 12.0)
-        frame_count = max(1, round(duration * capture_fps))
-
-        for i in range(frame_count):
-            # virtual-time-budget advances the page's own clock (CSS
-            # animations, rAF callbacks, setTimeout/setInterval) by this
-            # many milliseconds before the screenshot is taken, rather
-            # than depending on real elapsed wall-clock time -- so the
-            # capture is deterministic and not at the mercy of how fast
-            # this machine happens to render each frame.
-            virtual_time_ms = int(round((i / capture_fps) * 1000))
-            frame_file = frames_dir / f"frame_{i:05d}.png"
-            chrome_cmd = [
-                chrome_bin,
-                "--headless=new",
-                f"--screenshot={frame_file}",
-                f"--window-size={width},{height}",
-                "--default-background-color=00000000",
-                f"--virtual-time-budget={max(virtual_time_ms, 1)}",
-                target_html.as_uri(),
-            ]
-            subprocess.run(
-                chrome_cmd,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        # Stitch the sampled frame sequence into a video at capture_fps,
-        # then let ffmpeg's own fps filter interpolate/duplicate up to
-        # the timeline's actual `fps` for the final encode.
-        ff_cmd = [
-            "ffmpeg",
-            "-y",
-            "-framerate",
-            str(capture_fps),
-            "-i",
-            str(frames_dir / "frame_%05d.png"),
-            "-vf",
-            f"fps={fps}",
-            "-c:v",
-            "libx264",
-            "-t",
-            str(duration),
-            "-pix_fmt",
-            "yuv420p",
-            str(out_file),
-        ]
-        subprocess.run(
-            ff_cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        target_html, _ = self._write_bundle(clip, info)
+        return detect_motion(
+            target_html,
+            int(info["canvas"].width),
+            int(info["canvas"].height),
+            timeout=self.render_timeout,
         )
 
     def compile(
         self,
         clip: CodedVisualClip,
         force: bool = False,
-        render_video: bool = False,
+        render_video: bool | None = None,
     ) -> str:
-        """Compile the clip by preparing the bundle and optionally rendering to video."""
+        """Render `clip` to media and return the media path.
+
+        `render_video`: ``True`` forces video, ``False`` forces a still image,
+        ``None`` (default) follows the clip's ``render_mode`` (auto-detecting
+        motion). The result is always a real media file -- a PNG or a video --
+        never the intermediate HTML.
+        """
         clip.compile_status = CompileStatus.COMPILING
         try:
-            if render_video:
-                out_path = self.render_to_video(clip, force=force)
-                return str(out_path)
-
-            target_html, cache_key = self.prepare_bundle(clip)
-            clip.media_source = str(target_html)
-            clip.compile_status = CompileStatus.READY
-            return str(target_html)
-        except Exception as e:
+            if render_video is None:
+                animated = self.is_animated(clip)
+            else:
+                animated = render_video
+            path = (
+                self.render_to_video(clip, force=force)
+                if animated
+                else self.render_to_image(clip, force=force)
+            )
+            return str(path)
+        except CodedVisualCompileError:
             clip.compile_status = CompileStatus.FAILED
-            raise RuntimeError(f"Failed to compile CodedVisualClip '{clip.id}': {e}") from e
+            raise
+        except Exception as err:
+            clip.compile_status = CompileStatus.FAILED
+            raise CodedVisualCompileError(f"Failed to compile CodedVisualClip '{clip.id}': {err}") from err

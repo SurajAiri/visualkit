@@ -1,13 +1,60 @@
+"""CodedVisualClip: an HTML/CSS/JS visual that is *rendered* into media.
+
+A coded visual is a small web project (a single ``.html`` file or a
+directory bundle with ``index.html`` + assets) that draws an infographic or
+animation. It is **not** itself media: the compiler renders it, in a
+headless browser, into a concrete file -- a PNG (for a still visual) or a
+video (for an animated one) -- and that file is what the timeline and the
+exporters treat as an ordinary media clip.
+
+Design canvas and scaling
+-------------------------
+The visual is authored against a fixed *design canvas* (``canvas_size``,
+e.g. 1920x1080, or 1080x1920 for vertical). It is always rendered at that
+design size, so the layout never reflows or breaks, and is then scaled --
+preserving its aspect ratio -- to fit whatever target the exporter
+composites it into (see `Transform`/`Size`). Changing the export
+resolution therefore rescales the picture instead of re-laying it out.
+"""
+
+from __future__ import annotations
+
+import re
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from visualkit.models.clips.base import Size, Source
-from visualkit.models.variable import Variable, VariableType
+from visualkit.models.variable import Variable, VariableType, infer_variable_type
+from visualkit.utils.time import Time
 
 from .media import MediaClip
+
+_ASPECT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$")
+
+
+def parse_aspect_ratio(text: str) -> tuple[float, float]:
+    """Parse ``'16:9'`` / ``'16/9'`` into ``(16.0, 9.0)``. Raises ValueError."""
+    match = _ASPECT_RE.match(text)
+    if not match:
+        raise ValueError(f"aspect ratio must look like '16:9' or '16/9', got {text!r}")
+    w, h = float(match.group(1)), float(match.group(2))
+    if w <= 0 or h <= 0:
+        raise ValueError(f"aspect ratio components must be positive, got {text!r}")
+    return w, h
+
+
+def aspect_ratio_for(width: float, height: float) -> str:
+    """Reduce a pixel size to the simplest integer ratio string, e.g. 1920x1080 -> '16:9'."""
+    from math import gcd
+
+    w, h = int(round(width)), int(round(height))
+    if w <= 0 or h <= 0:
+        raise ValueError("width and height must be positive")
+    g = gcd(w, h)
+    return f"{w // g}:{h // g}"
 
 
 class CompileStatus(str, Enum):
@@ -17,74 +64,161 @@ class CompileStatus(str, Enum):
     FAILED = "failed"
 
 
-class CodedVisualClip(MediaClip):
-    """Represents an HTML/CSS/JS or code-based animated visual or infographic clip.
+class RenderMode(str, Enum):
+    """How a coded visual becomes media."""
 
-    References an external HTML file or a project directory bundle via source.source,
-    preventing bloated timeline metadata. Preserves designed aspect ratio and canvas dimensions.
+    AUTO = "auto"  # still if the page has no motion, video otherwise
+    IMAGE = "image"  # always a single PNG frame
+    VIDEO = "video"  # always an animated video
+
+
+class CodedVisualClip(MediaClip):
+    """An HTML/CSS/JS visual that is rendered to an image or video, then used as a normal media clip.
+
+    ``source.source`` references the ``.html`` file or bundle directory (kept
+    as a reference so timeline JSON stays small). Once compiled,
+    ``media_source`` points at the rendered PNG/video.
     """
 
     clip_type: Literal["coded_visual"] = Field(
         default="coded_visual", frozen=True, description="Type of the clip (coded visual)"
     )
 
-    # Design dimensions and aspect ratio from metadata
-    aspect_ratio: str = Field(
-        default="16:9",
-        description="Aspect ratio defined in code metadata (e.g. '16:9', '9:16', '1:1')",
+    aspect_ratio: str | None = Field(
+        default=None,
+        description=(
+            "Design aspect ratio ('16:9', '9:16', '1:1'). Left unset it is derived from "
+            "`canvas_size`; if both are given they must agree."
+        ),
     )
-    canvas_size: Size = Field(
-        default_factory=lambda: Size(width=1920, height=1080),
-        description="Design canvas dimensions (width and height) for the infographic",
+    canvas_size: Size | None = Field(
+        default=None,
+        description=(
+            "Design canvas in pixels. Left unset it is taken from the visual's own "
+            "manifest/meta tags (falling back to 1920x1080)."
+        ),
     )
     auto_scale: bool = Field(
         default=True,
-        description="Automatically scale the rendered media keeping aspect ratio to fit target",
+        description=(
+            "Scale the rendered visual, preserving aspect ratio, to fit the target frame. "
+            "When False it is placed at its native design size."
+        ),
+    )
+    render_mode: RenderMode = Field(
+        default=RenderMode.AUTO,
+        description="Render a still image, a video, or decide automatically from the page's motion.",
     )
 
-    # Variables definition and assignments
     variables: dict[str, Variable] = Field(
         default_factory=dict,
         description="Named variables/parameters for dynamic infographic templating",
     )
 
     compile_status: CompileStatus = Field(default=CompileStatus.PENDING)
-
-    # Media source updated after compilation
     media_source: str | None = Field(
         default=None,
-        description="Reference to the compiled media source (e.g. rendered video or image)",
+        description="Rendered media (PNG or video). Set by the compiler.",
     )
+
+    # ------------------------------------------------------------------ validation
+    @field_validator("aspect_ratio")
+    @classmethod
+    def _validate_aspect(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        w, h = parse_aspect_ratio(value)
+        return f"{w:g}:{h:g}"
+
+    @field_validator("canvas_size")
+    @classmethod
+    def _validate_canvas(cls, value: Size | None) -> Size | None:
+        if value is not None and (value.width <= 0 or value.height <= 0):
+            raise ValueError(f"canvas_size must have positive width and height, got {value}")
+        return value
 
     @model_validator(mode="before")
     @classmethod
     def _prepare_source_and_vars(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            # Allow passing source as a plain string path
-            if "source" in data and isinstance(data["source"], str):
-                data["source"] = Source(source=data["source"])
-            elif "source" not in data:
-                data["source"] = Source(source="unspecified")
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)  # never mutate the caller's dict
 
-            # Allow passing raw dict of variables: {"title": "Hello", "count": 10}
-            # or {"title": Variable(...)} or {"title": {"type": "string", "value": "..."}}
-            raw_vars = data.get("variables")
-            if isinstance(raw_vars, dict):
-                normalized: dict[str, Any] = {}
-                for k, v in raw_vars.items():
-                    if isinstance(v, Variable):
-                        normalized[k] = v
-                    elif isinstance(v, dict):
-                        if "name" not in v:
-                            v = {**v, "name": k}
-                        normalized[k] = v
-                    else:
-                        normalized[k] = Variable(name=k, value=v, default=v)
-                data["variables"] = normalized
-            elif isinstance(raw_vars, list):
-                data["variables"] = {(v.name if isinstance(v, Variable) else v["name"]): v for v in raw_vars}
+        src = data.get("source")
+        if isinstance(src, (str, Path)):
+            data["source"] = Source(source=str(src))
+        elif src is None:
+            raise ValueError("CodedVisualClip requires a `source` (an .html file or bundle directory)")
+
+        raw_vars = data.get("variables")
+        if isinstance(raw_vars, dict):
+            data["variables"] = {k: cls._normalise_variable(k, v) for k, v in raw_vars.items()}
+        elif isinstance(raw_vars, list):
+            normalised: dict[str, Any] = {}
+            for item in raw_vars:
+                name = item.name if isinstance(item, Variable) else item["name"]
+                normalised[name] = cls._normalise_variable(name, item)
+            data["variables"] = normalised
         return data
 
+    @staticmethod
+    def _looks_like_variable_spec(raw: dict[str, Any]) -> bool:
+        """True if `raw` is a serialized `Variable` (not merely a dict-*valued* variable).
+
+        A variable spec uses only Variable's own field names and declares its
+        ``value`` or ``default`` (or an explicit ``type``). A plain payload such as
+        ``{"a": 1}`` or ``{"label": "x"}`` is data and must become a JSON variable.
+        """
+        allowed = set(Variable.model_fields)
+        if not raw or not set(raw) <= allowed:
+            return False
+        return bool({"value", "default", "type"} & set(raw))
+
+    @classmethod
+    def _normalise_variable(cls, name: str, raw: Any) -> Any:
+        if isinstance(raw, Variable):
+            return raw
+        if isinstance(raw, dict) and cls._looks_like_variable_spec(raw):
+            return raw if "name" in raw else {**raw, "name": name}
+        return Variable(name=name, type=infer_variable_type(raw), value=raw, default=raw)
+
+    @model_validator(mode="after")
+    def _check_canvas_matches_ratio(self) -> "CodedVisualClip":
+        if self.canvas_size is not None and self.aspect_ratio is not None:
+            rw, rh = parse_aspect_ratio(self.aspect_ratio)
+            if abs(self.canvas_size.width / self.canvas_size.height - rw / rh) > 0.01:
+                raise ValueError(
+                    f"canvas_size {self.canvas_size.width:g}x{self.canvas_size.height:g} does not match "
+                    f"aspect_ratio {self.aspect_ratio}; give only one, or make them agree"
+                )
+        return self
+
+    # ------------------------------------------------------------------ design canvas
+    @property
+    def design_size(self) -> tuple[int, int]:
+        """Effective design canvas (width, height): explicit, else manifest, else 1920x1080."""
+        if self.canvas_size is not None:
+            return int(self.canvas_size.width), int(self.canvas_size.height)
+        return self._manifest_design_size() or (1920, 1080)
+
+    @property
+    def design_aspect_ratio(self) -> str:
+        """Effective aspect ratio string, derived from the design canvas unless set explicitly."""
+        if self.aspect_ratio is not None:
+            return self.aspect_ratio
+        w, h = self.design_size
+        return aspect_ratio_for(w, h)
+
+    def _manifest_design_size(self) -> tuple[int, int] | None:
+        try:
+            from visualkit.coded_visual.project import load_coded_visual
+
+            _, manifest, _ = load_coded_visual(self.source.source)
+        except (OSError, ValueError):
+            return None
+        return int(manifest.canvas_size.width), int(manifest.canvas_size.height)
+
+    # ------------------------------------------------------------------ variables
     def define_variable(
         self,
         name: str,
@@ -93,8 +227,9 @@ class CodedVisualClip(MediaClip):
         default: Any = None,
         label: str | None = None,
         description: str | None = None,
+        required: bool = False,
     ) -> Variable:
-        """Define or update a template variable with metadata."""
+        """Define or replace a template variable with metadata."""
         var = Variable(
             name=name,
             type=type,
@@ -102,39 +237,38 @@ class CodedVisualClip(MediaClip):
             default=default,
             label=label,
             description=description,
+            required=required,
         )
         self.variables[name] = var
-        self._invalidate_compile()
+        self.invalidate_compile()
         return var
 
     def set_variable(self, name: str, value: Any) -> None:
-        """Assign a value to an existing or new variable."""
+        """Assign a value to a variable (creating it, typed by inference, if new)."""
         if name in self.variables:
             self.variables[name].value = value
         else:
-            self.variables[name] = Variable(name=name, value=value, default=value)
-        self._invalidate_compile()
+            self.variables[name] = Variable(
+                name=name, type=infer_variable_type(value), value=value, default=value
+            )
+        self.invalidate_compile()
 
-    def _invalidate_compile(self) -> None:
-        """Mark this clip's compiled output as stale.
+    def invalidate_compile(self) -> None:
+        """Mark the rendered output stale so the next compile re-renders.
 
-        `_compile()` previously short-circuited purely on
-        `compile_status == READY and media_source` being set, with
-        nothing anywhere resetting `compile_status` when a variable
-        changed after the first successful compile -- so
-        `set_variable("title", "Second")` after an initial compile would
-        leave the stale READY status (and the old rendered media_source)
-        in place, and a re-flatten would keep reusing the first render.
-        Called from every mutator that can change what the compiled
-        output should look like (variable assignments/definitions), so a
-        change always forces recompilation on the next `_compile()` call,
-        regardless of how it happened.
+        Called by every mutator on this clip. The compiler additionally
+        keys its cache on the *current* state, so even a direct mutation
+        (``clip.variables["x"].value = ...``) that bypasses this method
+        can never serve a stale render from the cache; this just also
+        clears `media_source` so nothing downstream reads the old file.
         """
-        if self.compile_status == CompileStatus.READY:
+        if self.compile_status != CompileStatus.PENDING or self.media_source is not None:
             self.compile_status = CompileStatus.PENDING
+            self.media_source = None
+
+    _invalidate_compile = invalidate_compile  # backwards-compatible alias
 
     def get_variable(self, name: str) -> Variable | None:
-        """Get the Variable model for a given variable name."""
         return self.variables.get(name)
 
     def get_resolved_variables(self) -> dict[str, Any]:
@@ -142,61 +276,100 @@ class CodedVisualClip(MediaClip):
         return {name: var.resolve_value() for name, var in self.variables.items()}
 
     def get_set_variables(self) -> dict[str, Any]:
-        """Return names and current assigned values of all explicitly set variables."""
         return {name: var.value for name, var in self.variables.items() if var.is_set}
 
     def get_unset_variables(self) -> dict[str, Variable]:
-        """Return all variables that have not been explicitly assigned a value."""
         return {name: var for name, var in self.variables.items() if not var.is_set}
 
     def get_missing_required_variables(self) -> list[str]:
-        """Return variable names that are marked as required but have no value or default."""
-        return [name for name, var in self.variables.items() if var.required and var.resolve_value() is None]
+        """Names of required variables that have neither a value nor a default."""
+        return [n for n, v in self.variables.items() if v.required and v.resolve_value() is None]
 
     def load_manifest(self, path: str | Path | None = None) -> None:
-        """Load metadata/manifest from the source path and update aspect ratio, canvas size, and variables."""
+        """Pull canvas, aspect ratio, fps and variable declarations from the visual's own manifest/meta.
+
+        Explicit clip settings win; the manifest only fills what is unset.
+        """
         from visualkit.coded_visual.project import load_coded_visual
 
-        target_path = path or self.source.source
-        if not target_path or target_path == "unspecified":
-            return
+        target = path or self.source.source
+        _, manifest, _ = load_coded_visual(target)
 
-        _, manifest, _ = load_coded_visual(target_path)
-        self.aspect_ratio = manifest.aspect_ratio
-        self.canvas_size = manifest.canvas_size
-        if manifest.fps:
+        if self.canvas_size is None:
+            self.canvas_size = manifest.canvas_size
+        if self.aspect_ratio is None and self.canvas_size is not None:
+            self.aspect_ratio = aspect_ratio_for(self.canvas_size.width, self.canvas_size.height)
+        if manifest.fps and "fps" not in self.model_fields_set:
             self.fps = manifest.fps
 
-        # Merge manifest variables as defaults if not already explicitly set
         for var_name, var in manifest.variables.items():
-            if var_name not in self.variables:
-                self.variables[var_name] = var
-            elif self.variables[var_name].value is None and var.default is not None:
-                self.variables[var_name].default = var.default
+            existing = self.variables.get(var_name)
+            if existing is None:
+                self.variables[var_name] = var.model_copy(deep=True)
+            else:
+                if existing.default is None and var.default is not None:
+                    existing.default = var.default
+                for attr in ("label", "description"):
+                    if getattr(existing, attr) is None and getattr(var, attr) is not None:
+                        setattr(existing, attr, getattr(var, attr))
+                if var.required and not existing.required:
+                    existing.required = True
+        self.invalidate_compile()
+
+    # ------------------------------------------------------------------ compile
+    def compile(self, compiler: Any = None, *, force: bool = False) -> "CodedVisualClip":
+        """Render this visual to media now (blocking). Returns self.
+
+        Raises `CodedVisualCompileError` on failure; `compile_status` is FAILED.
+        """
+        if self.compile_status == CompileStatus.READY and self.media_source and not force:
+            return self
+        if compiler is None:
+            from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+            compiler = CodedVisualCompiler()
+        compiler.compile(self, force=force)
+        return self
 
     async def _compile(self) -> None:
-        """Compile the code for the coded visual clip."""
-        from visualkit.coded_visual.compiler import CodedVisualCompiler
+        """Async wrapper: runs the blocking compile in a worker thread so it doesn't stall an event loop."""
+        import asyncio
 
-        if self.compile_status == CompileStatus.READY and self.media_source:
-            return
+        await asyncio.to_thread(self.compile)
 
-        compiler = CodedVisualCompiler()
-        compiler.compile(self)
+    def to_media_clip(self) -> MediaClip:
+        """Convert a *compiled* clip into an ordinary `MediaClip` (synchronous)."""
+        if self.compile_status != CompileStatus.READY or not self.media_source:
+            from visualkit.utils.exceptions import CodedVisualCompileError
 
-    async def resolve(self) -> MediaClip:
-        """Resolve the coded visual clip to a media clip."""
-        await self._compile()
-        if self.media_source is None:
-            raise ValueError("Media source is not set. Compilation might have failed.")
+            raise CodedVisualCompileError(
+                f"CodedVisualClip '{self.id}' has not been compiled (status={self.compile_status.value}); "
+                "call .compile() or flatten via a Timeline first."
+            )
+        width, height = self.design_size
+        is_image = Path(self.media_source).suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".webp",
+            ".gif",
+            ".svg",
+        }
         return MediaClip(
             id=self.id,
             timeline_start=self.timeline_start,
             duration=self.duration,
             speed=self.speed,
-            source=Source(source=self.media_source, start=self.source.start),
+            # A still image has no timeline of its own, so the trim offset must not
+            # be carried over; for video it is the offset into the *rendered* file.
+            source=Source(source=self.media_source, start=Time.zero() if is_image else self.source.start),
             fps=self.fps,
-            resolution=(int(self.canvas_size.width), int(self.canvas_size.height)),
-            transform=self.transform,
-            source_audio=self.source_audio,
+            resolution=(width, height),
+            transform=self.transform.model_copy(deep=True),
+            source_audio=self.source_audio.model_copy(deep=True),
         )
+
+    async def resolve(self) -> MediaClip:
+        """Compile (off the event loop) and return the concrete `MediaClip`."""
+        await self._compile()
+        return self.to_media_clip()

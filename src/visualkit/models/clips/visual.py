@@ -46,7 +46,7 @@ class Transform(VisualKitModel):
     )
     scale: float = Field(
         default=1.0,
-        ge=0.0,
+        gt=0.0,
         le=100.0,
         description=(
             "Uniform size multiplier applied to the whole frame after "
@@ -58,7 +58,7 @@ class Transform(VisualKitModel):
     )
     zoom: float = Field(
         default=1.0,
-        ge=0.0,
+        gt=0.0,
         le=100.0,
         description=(
             "Digital punch-in (1.0 = no zoom = identity): crops into the "
@@ -74,6 +74,24 @@ class Transform(VisualKitModel):
         le=100,
         description="Opacity as a 0-100 percent (100 = fully opaque), applied when compositing.",
     )
+
+    @property
+    def is_identity(self) -> bool:
+        """True if this transform changes nothing (default position, size, rotation, scale, zoom, opacity).
+
+        Exporters skip emitting motion/opacity effects for identity transforms so imported clips
+        stay "clean" (no spurious modified-clip state in an NLE's inspector).
+        """
+        return (
+            self.position.x == 0
+            and self.position.y == 0
+            and self.size.width == 0
+            and self.size.height == 0
+            and self.rotation == 0
+            and self.scale == 1
+            and self.zoom == 1
+            and self.opacity == 100
+        )
 
 
 class VisualClip(BaseClip):

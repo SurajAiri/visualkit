@@ -234,5 +234,3 @@ def test_transform_rotation_allows_negative_and_multi_turn_values():
 
     with pytest.raises(Exception):
         Transform(rotation=99999.0)
-
-

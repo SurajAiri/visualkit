@@ -124,7 +124,7 @@ print(type(b2))
 # Bike
 
 
-from visualkit.models.clips import CodedVisualClip, VisualContent, AudioContent
+from visualkit.models.clips import AudioContent, CodedVisualClip, VisualContent
 
 # cvc = CodedVisualClip(
 #     id="coded1",

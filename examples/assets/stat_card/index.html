@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Animated Stat Card</title>
+  <!--
+    Design canvas: this page is authored for 1920x1080 (see manifest.json). VisualKit
+    puts everything inside `.visualkit-canvas`, renders it at exactly that size, and
+    scales it (aspect preserved) to fit any target frame, so the layout never reflows.
+
+    Placeholders:  {{ name }}  is HTML-escaped;  {{{ name }}}  inserts raw HTML.
+    JavaScript:    window.__VARIABLES__.name  holds the same values.
+    Animation:     CSS animations/transitions and JS timers/requestAnimationFrame are all
+                   stepped frame-by-frame, so renders are identical on every machine.
+  -->
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .visualkit-canvas {
+      background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+      color: #fff; display: flex; align-items: center; justify-content: center;
+    }
+    .card {
+      width: 1100px; padding: 64px 80px; text-align: center;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12);
+      border-radius: 28px; box-shadow: 0 25px 50px -12px rgba(0,0,0,.5);
+      opacity: 0; transform: translateY(40px);
+      animation: rise .8s cubic-bezier(.2,.8,.2,1) .2s forwards;
+    }
+    .logo { width: 64px; height: 64px; margin-bottom: 24px; }   /* local file, resolved beside index.html */
+    .title { font-size: 30px; font-weight: 500; color: #94a3b8; letter-spacing: .1em; text-transform: uppercase; }
+    .metric { margin: 12px 0; font-size: 120px; font-weight: 800; color: {{ accent }}; }
+    .subtitle { font-size: 24px; color: #cbd5e1; }
+    .track { margin-top: 40px; height: 14px; border-radius: 7px; background: rgba(255,255,255,.12); overflow: hidden; }
+    .bar { height: 100%; width: 0; background: {{ accent }}; border-radius: 7px;
+           animation: fill 2s ease-out 1s forwards; }
+    @keyframes rise { to { opacity: 1; transform: none; } }
+    @keyframes fill { to { width: var(--progress, 0%); } }
+  </style>
+</head>
+<body>
+  <div class="visualkit-canvas">
+    <div class="card">
+      <img class="logo" src="logo.svg" alt="">
+      <div class="title">{{ title }}</div>
+      <div class="metric" id="metric">{{ value }}</div>
+      <div class="subtitle">{{ subtitle }}</div>
+      <div class="track"><div class="bar" id="bar"></div></div>
+    </div>
+  </div>
+  <script>
+    // Variables are also available to script, already typed (numbers stay numbers).
+    document.getElementById("bar").style.setProperty("--progress", window.__VARIABLES__.progress + "%");
+  </script>
+</body>
+</html>

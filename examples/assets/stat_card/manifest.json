@@ -1,0 +1,28 @@
+{
+  "name": "Animated Stat Card",
+  "canvas_size": {"width": 1920, "height": 1080},
+  "fps": 30,
+  "duration": 4,
+  "variables": {
+    "title": {
+      "name": "title", "type": "string", "required": true,
+      "label": "Card Title", "description": "Short header text for the statistic"
+    },
+    "value": {
+      "name": "value", "type": "string", "required": true,
+      "label": "Metric Value", "description": "The highlighted statistic, e.g. '10.5M'"
+    },
+    "subtitle": {
+      "name": "subtitle", "type": "string", "default": "Updated this quarter",
+      "label": "Subtitle", "description": "Secondary context line"
+    },
+    "accent": {
+      "name": "accent", "type": "color", "default": "#38bdf8",
+      "label": "Accent color", "description": "Any CSS color; tints the metric and the bar"
+    },
+    "progress": {
+      "name": "progress", "type": "number", "default": 72,
+      "label": "Progress %", "description": "0-100; how far the bar fills"
+    }
+  }
+}

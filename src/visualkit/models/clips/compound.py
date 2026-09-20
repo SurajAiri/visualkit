@@ -15,6 +15,7 @@ from pydantic import Field
 
 from visualkit.models.variable import Variable
 from visualkit.utils.base_model import VisualKitModel
+from visualkit.utils.exceptions import TemplateParameterError
 from visualkit.utils.time import Time
 
 from .base import BaseClip
@@ -22,6 +23,14 @@ from .visual import Transform
 
 if TYPE_CHECKING:
     from visualkit.models.timeline import Timeline
+
+
+#: Fields of a clip that a template parameter may never overwrite: they are
+#: identity/structure, not content, and rewriting them would corrupt the timeline
+#: (e.g. changing an inner clip's ``id`` breaks every reference to it).
+_PROTECTED_FIELDS = frozenset(
+    {"id", "clip_type", "linked_clip_id", "compound_clip_id", "inner_timeline", "exposed_parameters"}
+)
 
 
 class ExposedParameter(VisualKitModel):
@@ -200,32 +209,35 @@ class CompoundClip(BaseClip):
         return grouped
 
     def set_parameter(self, name: str, value: Any) -> None:
-        """Set an exposed parameter value and immediately apply it to child clips."""
+        """Set an exposed parameter value and immediately apply it to child clips.
+
+        A parameter that is neither exposed nor a ``'clip_id.property'`` path
+        raises `TemplateParameterError` instead of being stored and ignored.
+        """
+        known = {p.name for p in self.exposed_parameters}
+        if name not in known and "." not in name:
+            raise TemplateParameterError(
+                f"CompoundClip '{self.id}' has no exposed parameter {name!r}. "
+                f"Exposed: {sorted(known) or 'none'}. Use expose_parameter() first, or a "
+                "'clip_id.property' path."
+            )
         self.parameters[name] = value
         self.apply_parameters()
 
-    def apply_parameters(self) -> None:
+    def apply_parameters(self, *, strict: bool = False) -> None:
         """Propagate current parameters down to child clips in the inner timeline.
 
-        Applies every exposed parameter's *effective* value (the
-        explicitly-set value in `self.parameters` if present, otherwise
-        its `ExposedParameter.default`) -- not just the ones that happen
-        to already be in `self.parameters`. Previously this only iterated
-        `self.parameters`, so an exposed parameter with a configured
-        `default` and no explicit `set_parameter()` call was silently
-        never pushed to its target clip at all, leaving the child clip's
-        own hardcoded/original value in place regardless of the exposed
-        default.
+        Applies every exposed parameter's *effective* value (an explicitly
+        set value, else its ``default``). A parameter targeting a clip that
+        does not exist, or a property the clip does not have, is a template
+        authoring error: with ``strict=True`` (used when exporting) it
+        raises `TemplateParameterError`; otherwise it is skipped.
         """
         if not self.inner_timeline:
             return
 
         mapping_by_name = {p.name: p for p in self.exposed_parameters}
 
-        # 1. Apply every exposed parameter's effective value: explicitly
-        # set if present in self.parameters, else its declared default.
-        # A default of None means "no default was configured" and is
-        # skipped, matching the field's own documented meaning.
         for name, mapping in mapping_by_name.items():
             if name in self.parameters:
                 value = self.parameters[name]
@@ -233,33 +245,43 @@ class CompoundClip(BaseClip):
                 value = mapping.default
             else:
                 continue
-            _, clip = self.inner_timeline.get_clip(mapping.target_clip_id)
-            if clip is not None:
-                self._apply_val_to_clip(clip, mapping.target_variable, value)
+            self._apply_to_target(mapping.target_clip_id, mapping.target_variable, value, name, strict)
 
-        # 2. Support direct namespaced parameters: 'clip_id.property',
-        # for values set directly in self.parameters with no matching
-        # ExposedParameter mapping.
         for name, value in self.parameters.items():
-            if name in mapping_by_name:
-                continue  # already handled above
-            if "." in name:
-                target_clip_id, var_name = name.split(".", 1)
-                _, clip = self.inner_timeline.get_clip(target_clip_id)
-                if clip is not None:
-                    self._apply_val_to_clip(clip, var_name, value)
+            if name in mapping_by_name or "." not in name:
+                continue
+            target_clip_id, var_name = name.split(".", 1)
+            self._apply_to_target(target_clip_id, var_name, value, name, strict)
 
-    @staticmethod
-    def _apply_val_to_clip(clip: Any, var_name: str, value: Any) -> None:
-        """Helper to inject a value into a clip variable or attribute."""
-        if hasattr(clip, "set_parameter"):
+    def _apply_to_target(self, clip_id: str, var_name: str, value: Any, param: str, strict: bool) -> None:
+        _, clip = self.inner_timeline.get_clip(clip_id)
+        if clip is None:
+            if strict:
+                raise TemplateParameterError(
+                    f"Parameter {param!r} on CompoundClip '{self.id}' targets clip {clip_id!r}, "
+                    "which does not exist in its inner_timeline."
+                )
+            return
+        try:
+            self._apply_val_to_clip(clip, var_name, value)
+        except TemplateParameterError:
+            if strict:
+                raise
+
+    @classmethod
+    def _apply_val_to_clip(cls, clip: Any, var_name: str, value: Any) -> None:
+        """Inject `value` into a clip's variable or field; raises `TemplateParameterError` if impossible."""
+        if var_name in _PROTECTED_FIELDS:
+            raise TemplateParameterError(
+                f"{var_name!r} is a protected field and cannot be set by a template parameter."
+            )
+        if hasattr(clip, "set_parameter") and isinstance(clip, CompoundClip):
             clip.set_parameter(var_name, value)
         elif hasattr(clip, "set_variable"):
             clip.set_variable(var_name, value)
-        elif hasattr(clip, "variables") and isinstance(clip.variables, dict):
-            if var_name in clip.variables:
-                clip.variables[var_name].value = value
-            else:
-                clip.variables[var_name] = Variable(name=var_name, value=value, default=value)
-        elif hasattr(clip, var_name):
+        elif var_name in type(clip).model_fields:
             setattr(clip, var_name, value)
+        else:
+            raise TemplateParameterError(
+                f"{type(clip).__name__} '{clip.id}' has no variable or property {var_name!r}."
+            )

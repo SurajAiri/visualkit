@@ -5,12 +5,27 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "visualkit"
 version = "2.0.1"
-description = "An Video Editor engine library."
+description = "A programmable video-editing engine: timelines, compound clips, and code-rendered (HTML/CSS/JS) visuals, exportable to video or DaVinci Resolve."
 readme = "README.md"
 authors = [{ name = "Suraj Airi", email = "surajairi.ml@gmail.com" }]
-license = { text = "MIT license" }
+license = { text = "MIT" }
+keywords = ["video", "editing", "timeline", "ffmpeg", "davinci-resolve", "fcpxml", "xmeml", "infographics"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Video",
+    "Typing :: Typed",
+]
 requires-python = ">=3.12"
 dependencies = ["pydantic>=2.13.5"]
+
+[project.optional-dependencies]
+# Deterministic frame capture for *animated* coded visuals. VisualKit drives the
+# Chrome/Chromium you already have installed; this does not download a browser.
+render = ["playwright>=1.40"]
 
 [dependency-groups]
 dev = [
@@ -18,6 +33,8 @@ dev = [
     "pyperclip>=1.11.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
+    "playwright>=1.40",
+    "pillow>=10.0",
     "ruff>=0.12.1",
 ]
 
@@ -28,7 +45,15 @@ where = ["src"]
 [tool.setuptools.package-dir]
 "" = "src"
 
+[tool.setuptools.package-data]
+visualkit = ["py.typed"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "browser: drives a real headless Chrome/Chromium (skipped when none is installed)",
+]
 

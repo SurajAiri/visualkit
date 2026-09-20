@@ -1,8 +1,11 @@
+from importlib.metadata import PackageNotFoundError, version
+
 from visualkit.engine import AssetResolver, DictAssetResolver, TimelinePipeline
 from visualkit.exporters import BaseExporter, DaVinciResolveExporter, FFmpegVideoExporter
 from visualkit.models import (
     AudioClip,
     AudioContent,
+    AudioProperties,
     AudioTrack,
     BaseClip,
     Clip,
@@ -14,6 +17,7 @@ from visualkit.models import (
     InsertMode,
     MediaClip,
     Position,
+    RenderMode,
     Size,
     Source,
     TextClip,
@@ -28,11 +32,29 @@ from visualkit.models import (
     VisualClip,
     VisualContent,
 )
+from visualkit.utils.exceptions import (
+    BrowserNotFoundError,
+    CodedVisualCompileError,
+    CodedVisualError,
+    ExportError,
+    InvalidTimeError,
+    MissingSourceError,
+    TemplateParameterError,
+    TimelineValidationError,
+    VisualKitError,
+)
 from visualkit.utils.time import Time
 
+try:
+    __version__ = version("visualkit")
+except PackageNotFoundError:  # running from a source checkout that is not installed
+    __version__ = "0+unknown"
+
 __all__ = [
+    "__version__",
     "AudioClip",
     "AudioContent",
+    "AudioProperties",
     "AudioTrack",
     "BaseClip",
     "Clip",
@@ -44,6 +66,7 @@ __all__ = [
     "InsertMode",
     "MediaClip",
     "Position",
+    "RenderMode",
     "Size",
     "Source",
     "TextClip",
@@ -64,4 +87,14 @@ __all__ = [
     "BaseExporter",
     "DaVinciResolveExporter",
     "FFmpegVideoExporter",
+    # exceptions
+    "VisualKitError",
+    "InvalidTimeError",
+    "TimelineValidationError",
+    "TemplateParameterError",
+    "MissingSourceError",
+    "CodedVisualError",
+    "ExportError",
+    "CodedVisualCompileError",
+    "BrowserNotFoundError",
 ]

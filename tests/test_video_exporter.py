@@ -198,9 +198,10 @@ class TestRenderTextToImageEscaping:
     def _force_no_chrome(monkeypatch):
         """Deterministically simulate 'no Chrome installed' regardless of
         what's actually available in the environment running these tests."""
-        from visualkit.coded_visual.compiler import CodedVisualCompiler
+        from visualkit.coded_visual import browser
 
-        monkeypatch.setattr(CodedVisualCompiler, "_find_chrome_executable", staticmethod(lambda: None))
+        monkeypatch.delenv(browser.ENV_VAR, raising=False)
+        monkeypatch.setattr(browser, "find_chrome", lambda: None)
 
     def test_special_characters_are_html_escaped(self, tmp_path: Path, monkeypatch):
         """Text containing <, >, & must not be interpreted as HTML markup;
@@ -216,7 +217,7 @@ class TestRenderTextToImageEscaping:
         with pytest.raises(RuntimeError, match="Chrome"):
             exporter._render_text_to_image(clip, 1920, 1080)
 
-        html_file = (tmp_path / "cache" / "t1.html").resolve()
+        html_file = next((tmp_path / "cache").glob("text_*.html"))
         assert html_file.exists()
         content = html_file.read_text()
         assert "<up>" not in content
@@ -232,7 +233,7 @@ class TestRenderTextToImageEscaping:
         with pytest.raises(RuntimeError, match="Chrome"):
             exporter._render_text_to_image(clip, 1920, 1080)
 
-        content = (tmp_path / "cache" / "t2.html").resolve().read_text()
+        content = next((tmp_path / "cache").glob("text_*.html")).read_text()
         assert "<br>" in content
 
     def test_missing_chrome_raises_instead_of_returning_html_as_image(self, tmp_path: Path, monkeypatch):
@@ -262,5 +263,78 @@ class TestRenderTextToImageEscaping:
         with pytest.raises(RuntimeError, match="Chrome"):
             exporter._render_text_to_image(clip, 1920, 1080)
 
-        assert (custom_cache / "t4.html").exists()
+        assert list(custom_cache.glob("text_*.html"))
 
+
+class TestTextRenderCacheAndStyle:
+    """Guarantees added when text rendering moved to a content-hashed cache."""
+
+    def test_editing_text_never_serves_a_stale_render(self, tmp_path: Path):
+        """The cache used to be keyed by clip.id, so changing a clip's text kept
+        returning the first PNG. The key must depend on the pixels' inputs."""
+        exporter = FFmpegVideoExporter(cache_dir=tmp_path / "c")
+        a = TextClip(id="same_id", text="First", duration=Time.from_seconds(1))
+        b = TextClip(id="same_id", text="Second", duration=Time.from_seconds(1))
+        html_a = exporter._text_html(a, 640, 360)
+        html_b = exporter._text_html(b, 640, 360)
+        assert html_a != html_b
+
+    def test_full_text_style_reaches_the_html(self):
+        from visualkit.models import TextStyle
+
+        clip = TextClip(
+            id="s",
+            text="Styled",
+            duration=Time.from_seconds(1),
+            style=TextStyle(
+                font_family="Georgia",
+                font_size=72,
+                color="#ff0000",
+                weight="700",
+                alignment="left",
+                background_color="#000000",
+            ),
+        )
+        content = FFmpegVideoExporter._text_html(clip, 1920, 1080)
+        assert "Georgia" in content
+        assert "font-size:72px" in content
+        assert "font-weight:700" in content
+        assert "color:#ff0000" in content
+        assert "text-align:left" in content
+        assert "justify-content:flex-start" in content
+        assert "background:#000000" in content
+
+
+class TestTransformFilterChain:
+    """Pin the ffmpeg filter chain for Transform without needing to run ffmpeg."""
+
+    def test_rotation_output_is_sized_to_the_rotated_bounding_box(self):
+        """`rotate` without ow/oh crops to the pre-rotation box (a 90deg turn lost 44% of pixels)."""
+        from visualkit.exporters.video import _transform_filters
+        from visualkit.models import Transform
+
+        chain, w, h = _transform_filters(Transform(rotation=90), 640, 360)
+        assert "ow=360:oh=640" in chain
+        assert (w, h) == (360, 640)
+
+    def test_rotation_45_reports_enlarged_effective_size(self):
+        from visualkit.exporters.video import _transform_filters
+        from visualkit.models import Transform
+
+        _, w, h = _transform_filters(Transform(rotation=45), 640, 360)
+        assert w == h and w > 640 * 0.707  # bounding box of a rotated rectangle grows
+
+    def test_no_rotation_leaves_size_unchanged(self):
+        from visualkit.exporters.video import _transform_filters
+        from visualkit.models import Transform
+
+        chain, w, h = _transform_filters(Transform(), 640, 360)
+        assert "rotate" not in chain
+        assert (w, h) == (640, 360)
+
+    def test_scale_then_rotate_uses_scaled_size(self):
+        from visualkit.exporters.video import _transform_filters
+        from visualkit.models import Transform
+
+        _, w, h = _transform_filters(Transform(scale=0.5, rotation=90), 640, 360)
+        assert (w, h) == (180, 320)

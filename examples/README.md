@@ -35,11 +35,14 @@ Shows how to:
 
 ### [02_coded_visuals.py](02_coded_visuals.py)
 Shows how to:
-- Reference an HTML/CSS/JS animation template using `CodedVisualClip`.
-- Declare `Variable` schemas with labels, descriptions for AI agents, and defaults.
-- Inspect variables (`get_set_variables()`, `get_missing_required_variables()`).
-- Compile and render the template into a video asset using headless Chrome + FFmpeg.
-- Flatten the timeline, converting the coded visual into a concrete `MediaClip`.
+- Reference a visual **bundle** (`assets/stat_card/`: `index.html`, `manifest.json`, a local `logo.svg`).
+- Pull the design canvas and the typed `Variable` schema from the manifest with `load_manifest()`.
+- Set typed values (numbers, colors) and see a bad value rejected immediately.
+- Render a cheap still preview, then the full animation to MP4 (needs `pip install visualkit[render]`).
+- Flatten the timeline, turning the coded visual into a concrete `MediaClip`.
+
+The bundle is also the template to copy when authoring your own: put content in
+`.visualkit-canvas`, use `{{ variable }}` placeholders, and declare variables in `manifest.json`.
 
 ### [03_compound_clips_and_templates.py](03_compound_clips_and_templates.py)
 Shows how to:

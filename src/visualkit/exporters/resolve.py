@@ -1,4 +1,5 @@
 import xml.etree.ElementTree as ET
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 from xml.dom import minidom
@@ -10,11 +11,55 @@ from visualkit.models.clips.media import MediaClip
 from visualkit.models.clips.text import TextClip
 from visualkit.models.clips.visual import Transform
 from visualkit.models.timeline import Timeline
-from visualkit.utils.time import Time
+from visualkit.utils.time import Time, _fps_to_fraction, is_ntsc_rate, nominal_timebase
+
+
+class _FileRegistry:
+    """Assigns one XMEML ``<file id>`` per distinct media path.
+
+    XMEML requires a file used by several clips to be *declared once* and
+    referenced by id afterwards; redeclaring it per clip yields duplicate
+    media entries (and inconsistent durations) in the NLE's bin. The
+    declared duration must cover the furthest source frame any clip uses.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[str, str] = {}
+        self._max_out: dict[str, int] = {}
+        self._declared: set[str] = set()
+        self._has_audio: set[str] = set()
+
+    def note_use(self, key: str, out_frame: int, has_audio: bool = False) -> None:
+        """Pre-scan: record the furthest source frame reached by any use of `key`,
+        and whether any use plays the file's own audio (the single declaration
+        must then advertise an audio stream even if the first use is muted)."""
+        self._max_out[key] = max(self._max_out.get(key, 0), out_frame)
+        if has_audio:
+            self._has_audio.add(key)
+
+    def has_audio(self, key: str) -> bool:
+        return key in self._has_audio
+
+    def file_id(self, key: str) -> str:
+        if key not in self._ids:
+            self._ids[key] = f"file-{len(self._ids) + 1}"
+        return self._ids[key]
+
+    def max_out(self, key: str) -> int:
+        return self._max_out.get(key, 0)
+
+    def first_use(self, key: str) -> bool:
+        """True exactly once per file: the caller must then emit the full declaration."""
+        if key in self._declared:
+            return False
+        self._declared.add(key)
+        return True
 
 
 class DaVinciResolveExporter(BaseExporter):
     """Exports VisualKit Timelines into DaVinci Resolve-compatible XML (FCP 7 XML / XMEML or FCPXML)."""
+
+    _TITLE_EFFECT_ID = "basic-title"
 
     def __init__(
         self,
@@ -25,6 +70,9 @@ class DaVinciResolveExporter(BaseExporter):
         asset_resolver: Any = None,
     ):
         self.fps = fps
+        #: The exact frame rate (29.97 -> 30000/1001). All frame arithmetic uses this;
+        #: the integer `timebase` written to XMEML is only a label NLEs pair with `ntsc`.
+        self.fps_exact: Fraction = _fps_to_fraction(fps)
         self.resolution = resolution
         self.project_name = project_name
         self.sequence_name = sequence_name
@@ -42,7 +90,8 @@ class DaVinciResolveExporter(BaseExporter):
             self.asset_resolver = kwargs["asset_resolver"]
 
         # Ensure timeline is flattened and resolved
-        render_video = kwargs.get("render_video", False)
+        # None = auto: an animated coded visual becomes a video, a static one a PNG.
+        render_video = kwargs.get("render_video")
         flattened = timeline.flatten(render_video=render_video)
 
         if path.suffix.lower() == ".fcpxml":
@@ -55,6 +104,32 @@ class DaVinciResolveExporter(BaseExporter):
 
         return path
 
+    def _clip_source_key(self, clip: Any) -> str:
+        """Normalized identity of a clip's media file (post asset-resolution)."""
+        source = getattr(clip, "source", None)
+        raw = source.source if hasattr(source, "source") else str(source or "unknown")
+        return self._resolve_source(raw)
+
+    def _prescan_files(self, timeline: Timeline, fps: Fraction) -> _FileRegistry:
+        """Find, per distinct file, the furthest source frame used and whether audio is used."""
+        registry = _FileRegistry()
+        for track in timeline.all_tracks:
+            for clip in track.clips:
+                if isinstance(clip, TextClip):
+                    continue
+                dur_frames = clip.duration.to_frames(fps)
+                speed = getattr(clip, "speed", 1.0)
+                source = getattr(clip, "source", None)
+                in_frame = source.start.to_frames(fps) if isinstance(source, Source) else 0
+                source_audio = getattr(clip, "source_audio", None)
+                uses_audio = isinstance(clip, AudioClip) or (
+                    isinstance(clip, MediaClip) and source_audio is not None and not source_audio.muted
+                )
+                registry.note_use(
+                    self._clip_source_key(clip), in_frame + round(dur_frames * speed), uses_audio
+                )
+        return registry
+
     def generate_xmeml(self, timeline: Timeline) -> str:
         """Generate FCP 7 XML (XMEML v5), the universal timeline import format for DaVinci Resolve."""
         root = ET.Element("xmeml", version="5")
@@ -65,8 +140,10 @@ class DaVinciResolveExporter(BaseExporter):
         sequence = ET.SubElement(children, "sequence", id="sequence-1")
         ET.SubElement(sequence, "name").text = self.sequence_name
 
-        timebase = int(round(self.fps))
-        is_ntsc = "TRUE" if abs(self.fps - 29.97) < 0.05 or abs(self.fps - 23.976) < 0.05 else "FALSE"
+        timebase = nominal_timebase(self.fps_exact)  # 30 for 29.97: a label, paired with <ntsc>
+        is_ntsc = "TRUE" if is_ntsc_rate(self.fps_exact) else "FALSE"
+        fps = self.fps_exact  # exact rational used for every frame count below
+        files = self._prescan_files(timeline, fps)
 
         # Rate element
         rate = ET.SubElement(sequence, "rate")
@@ -77,7 +154,7 @@ class DaVinciResolveExporter(BaseExporter):
         total_duration_frames = 0
         for track in timeline.all_tracks:
             for clip in track.clips:
-                clip_end = (clip.timeline_start + clip.duration).to_frames(timebase)
+                clip_end = (clip.timeline_start + clip.duration).to_frames(fps)
                 if clip_end > total_duration_frames:
                     total_duration_frames = clip_end
 
@@ -97,7 +174,6 @@ class DaVinciResolveExporter(BaseExporter):
         ET.SubElement(sc_rate, "ntsc").text = is_ntsc
 
         clip_counter = 1
-        file_counter = 1
 
         # Video Tracks
         for track in timeline.video_tracks:
@@ -114,14 +190,12 @@ class DaVinciResolveExporter(BaseExporter):
                     # (Resolve included) recognizes as a real scheme --
                     # such a path previously imported as a broken/offline
                     # media reference rather than an editable title.
-                    self._append_text_generatoritem(
-                        v_track, clip, clip_counter, timebase, is_ntsc
-                    )
+                    self._append_text_generatoritem(v_track, clip, clip_counter, timebase, is_ntsc)
                     clip_counter += 1
                     continue
 
-                start_frame = clip.timeline_start.to_frames(timebase)
-                dur_frames = clip.duration.to_frames(timebase)
+                start_frame = clip.timeline_start.to_frames(fps)
+                dur_frames = clip.duration.to_frames(fps)
                 end_frame = start_frame + dur_frames
                 speed = getattr(clip, "speed", 1.0)
 
@@ -152,70 +226,57 @@ class DaVinciResolveExporter(BaseExporter):
                 # timeline duration, so this is also how `speed` reaches
                 # Resolve, not a separate field.
                 source = getattr(clip, "source", None)
-                in_frame = source.start.to_frames(timebase) if isinstance(source, Source) else 0
+                in_frame = source.start.to_frames(fps) if isinstance(source, Source) else 0
                 out_frame = in_frame + round(dur_frames * speed)
                 ET.SubElement(clipitem, "in").text = str(in_frame)
                 ET.SubElement(clipitem, "out").text = str(out_frame)
 
-                # File reference
-                file_elem = ET.SubElement(clipitem, "file", id=f"file-{file_counter}")
-                file_counter += 1
+                # File reference. XMEML requires a file used by several clips to be
+                # declared in full ONCE and referenced by id afterwards; redeclaring
+                # it per clip duplicates the media in the NLE's bin. The declaration
+                # (name/path/duration/streams) is per *file*; everything else in this
+                # loop body -- in/out, motion, opacity -- is per *clip* and always runs.
+                source_path = self._clip_source_key(clip)
+                file_id = files.file_id(source_path)
+                file_elem = ET.SubElement(clipitem, "file", id=file_id)
 
-                source_path = ""
-                if isinstance(clip, MediaClip):
-                    source_path = clip.source.source
-                else:
-                    source_path = getattr(clip, "source", None)
-                    if hasattr(source_path, "source"):
-                        source_path = source_path.source
-                    else:
-                        source_path = str(source_path or "unknown")
+                if files.first_use(source_path):
+                    ET.SubElement(file_elem, "name").text = Path(source_path).name if source_path else name
+                    path_url = self._resolve_source_uri(source_path) if source_path else "file:///unknown"
+                    ET.SubElement(file_elem, "pathurl").text = path_url
 
-                source_path = self._resolve_source(source_path)
-                ET.SubElement(file_elem, "name").text = Path(source_path).name if source_path else name
+                    f_rate = ET.SubElement(file_elem, "rate")
+                    ET.SubElement(f_rate, "timebase").text = str(timebase)
+                    ET.SubElement(f_rate, "ntsc").text = is_ntsc
+                    # Must cover the furthest source frame ANY clip using this file
+                    # reaches (pre-scanned), not just this first clip's out point.
+                    ET.SubElement(file_elem, "duration").text = str(
+                        max(dur_frames, files.max_out(source_path))
+                    )
 
-                path_url = self._resolve_source_uri(source_path) if source_path else "file:///unknown"
-                ET.SubElement(file_elem, "pathurl").text = path_url
+                    f_media = ET.SubElement(file_elem, "media")
+                    f_video = ET.SubElement(f_media, "video")
+                    f_sc = ET.SubElement(f_video, "samplecharacteristics")
+                    res = getattr(clip, "resolution", self.resolution)
+                    ET.SubElement(f_sc, "width").text = str(res[0])
+                    ET.SubElement(f_sc, "height").text = str(res[1])
 
-                f_rate = ET.SubElement(file_elem, "rate")
-                ET.SubElement(f_rate, "timebase").text = str(timebase)
-                ET.SubElement(f_rate, "ntsc").text = is_ntsc
-                # The file's own total duration must cover the out point we
-                # just referenced, not just the timeline duration -- a
-                # source-frame `out` beyond a file duration equal to
-                # `dur_frames` would be an out-of-range reference.
-                ET.SubElement(file_elem, "duration").text = str(max(dur_frames, out_frame))
+                    # A video file's own soundtrack is a property of the *file*: declared
+                    # as an <audio> stream here, not as a second clipitem. If ANY use of
+                    # the file plays it, the single declaration must advertise it -- even
+                    # when this first use happens to be muted.
+                    if isinstance(clip, MediaClip) and files.has_audio(source_path):
+                        f_audio = ET.SubElement(f_media, "audio")
+                        f_a_sc = ET.SubElement(f_audio, "samplecharacteristics")
+                        ET.SubElement(f_a_sc, "depth").text = "16"
+                        ET.SubElement(f_a_sc, "samplerate").text = "48000"
+                        ET.SubElement(f_audio, "channelcount").text = "2"
 
-                f_media = ET.SubElement(file_elem, "media")
-                f_video = ET.SubElement(f_media, "video")
-                f_sc = ET.SubElement(f_video, "samplecharacteristics")
-                res = getattr(clip, "resolution", self.resolution)
-                ET.SubElement(f_sc, "width").text = str(res[0])
-                ET.SubElement(f_sc, "height").text = str(res[1])
-
+                # Per clip: transform is not a property of the file, so it is emitted
+                # for every use (including ones whose <file> is only a reference).
                 transform = getattr(clip, "transform", None)
-                if isinstance(transform, Transform):
-                    self._append_motion_filter(clipitem, transform)
-
-                # A MediaClip's own embedded audio stream (e.g. a video
-                # file's soundtrack) is a property of the *file*, not a
-                # separate clip -- so in XMEML it's declared as an
-                # additional <audio> block on the same <file> element
-                # rather than a second <clipitem>. Previously nothing here
-                # ever declared it, so Resolve had no reason to expect the
-                # file to carry audio and the soundtrack was effectively
-                # dropped from the edit even though the source file has it.
-                source_audio = getattr(clip, "source_audio", None)
-                if (
-                    isinstance(clip, MediaClip)
-                    and source_audio is not None
-                    and not source_audio.muted
-                ):
-                    f_audio = ET.SubElement(f_media, "audio")
-                    f_a_sc = ET.SubElement(f_audio, "samplecharacteristics")
-                    ET.SubElement(f_a_sc, "depth").text = "16"
-                    ET.SubElement(f_a_sc, "samplerate").text = "48000"
-                    ET.SubElement(f_audio, "channelcount").text = "2"
+                if isinstance(transform, Transform) and not transform.is_identity:
+                    self._append_motion_filter(clipitem, transform, self.resolution)
 
         # Audio Section
         audio = ET.SubElement(media, "audio")
@@ -224,8 +285,8 @@ class DaVinciResolveExporter(BaseExporter):
                 continue
             a_track = ET.SubElement(audio, "track")
             for clip in track.clips:
-                start_frame = clip.timeline_start.to_frames(timebase)
-                dur_frames = clip.duration.to_frames(timebase)
+                start_frame = clip.timeline_start.to_frames(fps)
+                dur_frames = clip.duration.to_frames(fps)
                 end_frame = start_frame + dur_frames
                 speed = getattr(clip, "speed", 1.0)
 
@@ -250,7 +311,7 @@ class DaVinciResolveExporter(BaseExporter):
                 # the file for its full untrimmed-looking duration instead
                 # of the intended slice.
                 source = getattr(clip, "source", None)
-                in_frame = source.start.to_frames(timebase) if isinstance(source, Source) else 0
+                in_frame = source.start.to_frames(fps) if isinstance(source, Source) else 0
                 out_frame = in_frame + round(dur_frames * speed)
                 ET.SubElement(clipitem, "in").text = str(in_frame)
                 ET.SubElement(clipitem, "out").text = str(out_frame)
@@ -267,20 +328,20 @@ class DaVinciResolveExporter(BaseExporter):
                     ET.SubElement(param, "name").text = "Level"
                     ET.SubElement(param, "value").text = f"{level_db:.2f}"
 
-                file_elem = ET.SubElement(clipitem, "file", id=f"file-audio-{file_counter}")
-                file_counter += 1
+                source_path = self._clip_source_key(clip)
+                file_id = files.file_id(source_path)
+                file_elem = ET.SubElement(clipitem, "file", id=file_id)
+                if files.first_use(source_path):
+                    ET.SubElement(file_elem, "name").text = Path(source_path).name
+                    ET.SubElement(file_elem, "pathurl").text = self._resolve_source_uri(source_path)
 
-                source_path = clip.source.source if hasattr(clip, "source") else "unknown.wav"
-                source_path = self._resolve_source(source_path)
-                ET.SubElement(file_elem, "name").text = Path(source_path).name
-                ET.SubElement(file_elem, "pathurl").text = self._resolve_source_uri(source_path)
-
-                f_rate = ET.SubElement(file_elem, "rate")
-                ET.SubElement(f_rate, "timebase").text = str(timebase)
-                ET.SubElement(f_rate, "ntsc").text = is_ntsc
-                # See the matching comment in the video-track loop: the
-                # file's declared duration must cover the out point.
-                ET.SubElement(file_elem, "duration").text = str(max(dur_frames, out_frame))
+                    f_rate = ET.SubElement(file_elem, "rate")
+                    ET.SubElement(f_rate, "timebase").text = str(timebase)
+                    ET.SubElement(f_rate, "ntsc").text = is_ntsc
+                    # See the video loop: covers the furthest frame any use reaches.
+                    ET.SubElement(file_elem, "duration").text = str(
+                        max(dur_frames, files.max_out(source_path))
+                    )
 
         xml_bytes = ET.tostring(root, encoding="utf-8")
         parsed = minidom.parseString(xml_bytes)
@@ -302,7 +363,9 @@ class DaVinciResolveExporter(BaseExporter):
         return 20.0 * math.log10(volume)
 
     @staticmethod
-    def _append_motion_filter(clipitem: ET.Element, transform: Transform) -> None:
+    def _append_motion_filter(
+        clipitem: ET.Element, transform: Transform, resolution: tuple[int, int]
+    ) -> None:
         """Append an XMEML Basic Motion <filter> encoding `transform`.
 
         Previously nothing here ever read `clip.transform`: every visual
@@ -314,20 +377,12 @@ class DaVinciResolveExporter(BaseExporter):
         separate, also-standard "Opacity" filter since Basic Motion
         itself has no opacity parameter.
         """
-        # Percent-based center offset: XMEML's Basic Motion "Center"
-        # parameter is a fraction of the frame (horizontal/vertical), not
-        # raw pixels, so Position's pixel offset needs the target
-        # resolution to convert -- but resolution can vary per clip
-        # (MediaClip.resolution), so this uses a frame-relative
-        # convention instead: interpret Position as already being
-        # fraction-of-frame-sized when whichever exporter call site
-        # passes it through. To keep this filter self-contained and not
-        # need the resolution threaded in, horizontal/vertical here are
-        # expressed directly as the stored pixel values -- Resolve
-        # accepts raw pixel-scale center values from other NLEs
-        # (interpreted relative to its own project resolution) and this
-        # keeps the mapping lossless and reversible on read-back, rather
-        # than silently guessing a canvas size to normalize against.
+        # XMEML "Center" is normalized: (0, 0) is the middle of the frame and
+        # horiz/vert are *fractions of the sequence width/height* (0.5 is the
+        # right/bottom edge). Position is stored in pixels of the target frame,
+        # so divide by that frame's size. Position's y grows downward and so does
+        # XMEML's vertical axis, so no sign flip is needed.
+        frame_w, frame_h = resolution
         filt = ET.SubElement(clipitem, "filter")
         effect = ET.SubElement(filt, "effect")
         ET.SubElement(effect, "name").text = "Basic Motion"
@@ -353,8 +408,8 @@ class DaVinciResolveExporter(BaseExporter):
         ET.SubElement(center_param, "parameterid").text = "center"
         ET.SubElement(center_param, "name").text = "Center"
         center_value = ET.SubElement(center_param, "value")
-        ET.SubElement(center_value, "horiz").text = f"{transform.position.x:.4f}"
-        ET.SubElement(center_value, "vert").text = f"{transform.position.y:.4f}"
+        ET.SubElement(center_value, "horiz").text = f"{transform.position.x / frame_w:.6f}"
+        ET.SubElement(center_value, "vert").text = f"{transform.position.y / frame_h:.6f}"
 
         if transform.zoom != 1.0:
             zoom_param = ET.SubElement(effect, "parameter")
@@ -394,8 +449,8 @@ class DaVinciResolveExporter(BaseExporter):
         Resolve had no importer for it and either skipped the clip or
         showed it as offline/missing media.
         """
-        start_frame = clip.timeline_start.to_frames(timebase)
-        dur_frames = clip.duration.to_frames(timebase)
+        start_frame = clip.timeline_start.to_frames(self.fps_exact)
+        dur_frames = clip.duration.to_frames(self.fps_exact)
         end_frame = start_frame + dur_frames
 
         gen_item = ET.SubElement(v_track, "generatoritem", id=f"generatoritem-{clip_counter}")
@@ -454,8 +509,8 @@ class DaVinciResolveExporter(BaseExporter):
         ET.SubElement(alignment_param, "value").text = style.alignment.value
 
         transform = clip.transform
-        if isinstance(transform, Transform):
-            self._append_motion_filter(gen_item, transform)
+        if isinstance(transform, Transform) and not transform.is_identity:
+            self._append_motion_filter(gen_item, transform, self.resolution)
 
     @staticmethod
     def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -473,6 +528,27 @@ class DaVinciResolveExporter(BaseExporter):
                 pass
         return 255, 255, 255
 
+    def _fcpx_time(self, t: Time) -> str:
+        """Format `t` as an FCPXML rational-seconds string aligned to a whole frame.
+
+        FCPXML times must be whole multiples of the frame duration, written as
+        ``N/Ds`` (e.g. ``1001/30000s`` for one 29.97 frame). Decimal seconds like
+        ``2.000s`` fall between frames at NTSC rates and are rounded arbitrarily
+        on import, which shifts cuts by up to a frame.
+        """
+        frames = t.to_frames(self.fps_exact)
+        return self._fcpx_frames(frames)
+
+    def _fcpx_frames(self, frames: int) -> str:
+        if frames == 0:
+            return "0s"
+        seconds = Fraction(frames, 1) / self.fps_exact  # exact
+        num, den = seconds.numerator, seconds.denominator
+        return f"{num}s" if den == 1 else f"{num}/{den}s"
+
+    def _fcpx_frame_duration(self) -> str:
+        return self._fcpx_frames(1)
+
     def generate_fcpxml(self, timeline: Timeline) -> str:
         """Generate Apple FCPXML v1.10 markup for DaVinci Resolve / Final Cut Pro.
 
@@ -488,19 +564,34 @@ class DaVinciResolveExporter(BaseExporter):
         root = ET.Element("fcpxml", version="1.10")
         resources = ET.SubElement(root, "resources")
 
-        timebase = int(round(self.fps))
-        frame_dur = f"1/{timebase}s"
+        timebase = nominal_timebase(self.fps_exact)
+        frame_dur = self._fcpx_frame_duration()  # 1001/30000s for 29.97, 1/30s for 30
+        fps_label = (
+            f"{float(self.fps_exact):g}".replace(".", "") if is_ntsc_rate(self.fps_exact) else str(timebase)
+        )
 
         # Format resource
         ET.SubElement(
             resources,
             "format",
             id="r1",
-            name=f"FFVideoFormat{self.resolution[1]}p{timebase}",
+            name=f"FFVideoFormat{self.resolution[1]}p{fps_label}",
             frameDuration=frame_dur,
             width=str(self.resolution[0]),
             height=str(self.resolution[1]),
         )
+
+        # Titles reference this built-in Motion template by id. Declaring it is
+        # required for a valid document: an undeclared `ref` is a dangling
+        # reference that strict importers reject or render as a missing effect.
+        if any(isinstance(c, TextClip) for tr in timeline.all_tracks for c in tr.clips):
+            ET.SubElement(
+                resources,
+                "effect",
+                id=self._TITLE_EFFECT_ID,
+                name="Basic Title",
+                uid=".../Titles.localized/Bumper:Opener.localized/Basic Title.localized/Basic Title.moti",
+            )
 
         library = ET.SubElement(root, "library")
         event = ET.SubElement(library, "event", name=self.project_name)
@@ -517,7 +608,7 @@ class DaVinciResolveExporter(BaseExporter):
             project,
             "sequence",
             format="r1",
-            duration=f"{total_duration.seconds:.3f}s",
+            duration=self._fcpx_time(total_duration),
             tcStart="0s",
         )
         spine = ET.SubElement(sequence, "spine")
@@ -550,7 +641,7 @@ class DaVinciResolveExporter(BaseExporter):
                 src_uri = p.resolve().as_uri() if p.exists() else f"file://{source_path}"
 
                 source = getattr(clip, "source", None)
-                source_start_s = source.start.seconds if isinstance(source, Source) else 0.0
+                source_start = source.start if isinstance(source, Source) else Time.zero()
                 speed = getattr(clip, "speed", 1.0)
                 # The span of source media actually consumed: at speed=2,
                 # 1s of timeline duration consumes 2s of source -- see the
@@ -559,13 +650,13 @@ class DaVinciResolveExporter(BaseExporter):
                 # <video> element's duration always mirrored the outer
                 # clip's duration 1:1), so a clip's `source.start` trim
                 # point and `speed` retiming were both silently dropped.
-                consumed_source_s = clip.duration.seconds * speed
+                consumed_source = Time(clip.duration.value * Fraction(speed).limit_denominator(1_000_000))
 
                 asset_id = f"r{res_counter}"
                 res_counter += 1
                 # `duration` on the asset is the full media's usable
                 # range as far as this export knows it (at least the
-                # consumed span, starting from `source_start_s`); FCPXML
+                # consumed span, starting from `source_start`); FCPXML
                 # has no independent way to know a source file's true
                 # total length without probing it, so this declares only
                 # what's demonstrably needed.
@@ -576,7 +667,7 @@ class DaVinciResolveExporter(BaseExporter):
                     name=getattr(clip, "id", "clip"),
                     src=src_uri,
                     format="r1",
-                    duration=f"{source_start_s + consumed_source_s:.3f}s",
+                    duration=self._fcpx_time(source_start + consumed_source),
                     hasAudio="1" if self._media_clip_has_audio(clip) else "0",
                 )
 
@@ -584,15 +675,15 @@ class DaVinciResolveExporter(BaseExporter):
                     spine,
                     "clip",
                     name=getattr(clip, "id", "clip"),
-                    offset=f"{clip.timeline_start.seconds:.3f}s",
-                    duration=f"{clip.duration.seconds:.3f}s",
+                    offset=self._fcpx_time(clip.timeline_start),
+                    duration=self._fcpx_time(clip.duration),
                     format="r1",
                     lane=lane_attr if track_idx > 0 else "0",
                 )
                 # `start` is where, within the referenced asset, this
                 # clip's content begins (i.e. source.start); `duration`
                 # here is measured in *asset*/source time, which is why
-                # it's `consumed_source_s` rather than the outer clip's
+                # it's `consumed_source` rather than the outer clip's
                 # own (timeline) duration when speed != 1 -- FCPXML
                 # infers the playback rate from the ratio between this
                 # inner duration and the outer <clip> duration above.
@@ -601,13 +692,13 @@ class DaVinciResolveExporter(BaseExporter):
                     "video",
                     ref=asset_id,
                     offset="0s",
-                    start=f"{source_start_s:.3f}s",
-                    duration=f"{consumed_source_s:.3f}s",
+                    start=self._fcpx_time(source_start),
+                    duration=self._fcpx_time(consumed_source),
                 )
 
                 transform = getattr(clip, "transform", None)
-                if isinstance(transform, Transform):
-                    self._append_fcpxml_transform(video_elem, transform)
+                if isinstance(transform, Transform) and not transform.is_identity:
+                    self._append_fcpxml_transform(video_elem, transform, self.resolution)
 
                 if self._media_clip_has_audio(clip):
                     ET.SubElement(
@@ -615,8 +706,8 @@ class DaVinciResolveExporter(BaseExporter):
                         "audio",
                         ref=asset_id,
                         offset="0s",
-                        start=f"{source_start_s:.3f}s",
-                        duration=f"{consumed_source_s:.3f}s",
+                        start=self._fcpx_time(source_start),
+                        duration=self._fcpx_time(consumed_source),
                     )
 
         # Audio tracks. Unlike generate_xmeml (which has a dedicated
@@ -633,13 +724,13 @@ class DaVinciResolveExporter(BaseExporter):
                 src_uri = self._resolve_source_uri(self._resolve_source(source_path))
 
                 source = getattr(clip, "source", None)
-                source_start_s = source.start.seconds if isinstance(source, Source) else 0.0
+                source_start = source.start if isinstance(source, Source) else Time.zero()
                 speed = getattr(clip, "speed", 1.0)
                 # See the matching comment in the video-track loop above:
                 # previously always equal to the clip's own duration,
                 # which silently dropped `source.start` and `speed` for
                 # every AudioClip.
-                consumed_source_s = clip.duration.seconds * speed
+                consumed_source = Time(clip.duration.value * Fraction(speed).limit_denominator(1_000_000))
 
                 asset_id = f"r{res_counter}"
                 res_counter += 1
@@ -649,7 +740,7 @@ class DaVinciResolveExporter(BaseExporter):
                     id=asset_id,
                     name=getattr(clip, "id", "audio_clip"),
                     src=src_uri,
-                    duration=f"{source_start_s + consumed_source_s:.3f}s",
+                    duration=self._fcpx_time(source_start + consumed_source),
                     hasAudio="1",
                     audioSources="1",
                     audioChannels="2",
@@ -659,8 +750,8 @@ class DaVinciResolveExporter(BaseExporter):
                     spine,
                     "clip",
                     name=getattr(clip, "id", "audio_clip"),
-                    offset=f"{clip.timeline_start.seconds:.3f}s",
-                    duration=f"{clip.duration.seconds:.3f}s",
+                    offset=self._fcpx_time(clip.timeline_start),
+                    duration=self._fcpx_time(clip.duration),
                     lane=lane_attr,
                 )
                 audio_elem = ET.SubElement(
@@ -668,8 +759,8 @@ class DaVinciResolveExporter(BaseExporter):
                     "audio",
                     ref=asset_id,
                     offset="0s",
-                    start=f"{source_start_s:.3f}s",
-                    duration=f"{consumed_source_s:.3f}s",
+                    start=self._fcpx_time(source_start),
+                    duration=self._fcpx_time(consumed_source),
                 )
 
                 audio_properties = getattr(clip, "audio_properties", None)
@@ -699,7 +790,9 @@ class DaVinciResolveExporter(BaseExporter):
         return source_audio is None or not source_audio.muted
 
     @staticmethod
-    def _append_fcpxml_transform(video_elem: ET.Element, transform: Transform) -> None:
+    def _append_fcpxml_transform(
+        video_elem: ET.Element, transform: Transform, resolution: tuple[int, int]
+    ) -> None:
         """Append an <adjust-transform> element encoding `transform`.
 
         FCPXML's built-in spatial-conform effect for position/scale/
@@ -711,11 +804,19 @@ class DaVinciResolveExporter(BaseExporter):
         -- an approximation (true zoom crops rather than scaling the
         whole frame) noted here rather than silently ignored.
         """
+        # FCPXML `position` is expressed in *percent of frame height* (so 100 is one
+        # full frame height, independent of aspect ratio), with +y pointing UP.
+        # `Transform.position` is in pixels of the target frame with +y pointing DOWN,
+        # so convert units and flip the vertical sign. (Convention taken from the
+        # FCPXML DTD/Final Cut behaviour; not verified against a live Resolve import.)
+        frame_w, frame_h = resolution
+        pos_x = transform.position.x / frame_h * 100.0
+        pos_y = -transform.position.y / frame_h * 100.0
         effective_scale = transform.scale * transform.zoom
         ET.SubElement(
             video_elem,
             "adjust-transform",
-            position=f"{transform.position.x:.4f} {transform.position.y:.4f}",
+            position=f"{pos_x:.4f} {pos_y:.4f}",
             scale=f"{effective_scale:.4f} {effective_scale:.4f}",
             rotation=f"{transform.rotation:.4f}",
         )
@@ -739,9 +840,9 @@ class DaVinciResolveExporter(BaseExporter):
             spine,
             "title",
             name=clip.id,
-            offset=f"{clip.timeline_start.seconds:.3f}s",
-            duration=f"{clip.duration.seconds:.3f}s",
-            ref="basic-title",
+            offset=self._fcpx_time(clip.timeline_start),
+            duration=self._fcpx_time(clip.duration),
+            ref=self._TITLE_EFFECT_ID,
             lane=lane_attr,
         )
         style = clip.style
@@ -768,5 +869,5 @@ class DaVinciResolveExporter(BaseExporter):
         )
 
         transform = clip.transform
-        if isinstance(transform, Transform):
-            self._append_fcpxml_transform(title_elem, transform)
+        if isinstance(transform, Transform) and not transform.is_identity:
+            self._append_fcpxml_transform(title_elem, transform, self.resolution)

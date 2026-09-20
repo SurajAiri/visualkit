@@ -1,11 +1,20 @@
-"""Example 2: Coded Visuals (HTML/CSS/JS Infographics & Dynamic Variables)
+"""Example 2: Coded visuals (HTML/CSS/JS infographics with typed variables)
+
+A *coded visual* is a small web project that draws an infographic or an
+animation. VisualKit renders it in a headless browser into ordinary media --
+a PNG for a still visual, a video for an animated one -- and that file is then
+used like any other clip on the timeline.
 
 Demonstrates:
-- Creating a CodedVisualClip referencing an external HTML template.
-- Declaring and inspecting variables (required, labels, descriptions for AI agents).
-- Injecting dynamic values into Jinja-like {{ placeholders }} and window.__VARIABLES__.
-- Rendering the infographic animation into an MP4 video asset using headless Chrome + FFmpeg.
-- Compiling and placing the rendered visual onto a timeline.
+- Referencing a visual bundle (a directory with index.html, manifest.json and
+  local assets such as an SVG logo).
+- Pulling its design canvas and variable schema from the manifest.
+- Typed variables: required/optional, colors, numbers, labels for UI builders.
+- Rendering a still preview, and rendering the animation to video.
+- Placing the visual on a timeline and flattening it into a normal media clip.
+
+Requires: Chrome/Chromium (set VISUALKIT_CHROME if it is not auto-detected),
+FFmpeg, and `pip install visualkit[render]` for the animated part.
 """
 
 from pathlib import Path
@@ -13,67 +22,64 @@ from pathlib import Path
 import visualkit as vk
 from visualkit.coded_visual.compiler import CodedVisualCompiler
 
+BUNDLE = Path(__file__).parent / "assets" / "stat_card"
 
-def main():
+
+def main() -> None:
     print("=== VisualKit Example 2: Coded Visuals & Infographics ===")
 
-    template_path = Path(__file__).parent / "assets" / "infographic.html"
-
-    # 1. Create a CodedVisualClip with variable definitions
+    # 1. Reference the bundle. Nothing is rendered yet.
     clip = vk.CodedVisualClip(
         id="stat_card",
-        source=str(template_path),
+        source=str(BUNDLE),
         timeline_start=vk.Time.from_seconds(1),
         duration=vk.Time.from_seconds(4),
-        variables={
-            "title": vk.Variable(
-                name="title",
-                label="Card Title",
-                description="Short header text for the statistic",
-                required=True,
-                value="Global Active Users",
-            ),
-            "value": vk.Variable(
-                name="value",
-                label="Metric Value",
-                description="The highlighted numerical statistic",
-                required=True,
-                value="10.5M",
-            ),
-            "subtitle": vk.Variable(
-                name="subtitle",
-                label="Subtitle",
-                description="Secondary context line",
-                default="Updated this quarter",
-            ),
-        },
     )
 
-    # 2. Inspect variable state (useful for UI builders & AI agents)
-    print("Set variables:             ", list(clip.get_set_variables().keys()))
-    print("Unset variables:           ", list(clip.get_unset_variables().keys()))
-    print("Missing required variables:", clip.get_missing_required_variables())
-    print(f"Canvas size:                {clip.canvas_size.width}x{clip.canvas_size.height}")
-    print(f"Aspect ratio:               {clip.aspect_ratio}")
+    # 2. The design canvas and variable schema come from manifest.json / <meta> tags.
+    clip.load_manifest()
+    print(f"Design canvas : {clip.design_size[0]}x{clip.design_size[1]} ({clip.design_aspect_ratio})")
+    print("Variables     :", ", ".join(clip.variables))
+    print("Still needed  :", clip.get_missing_required_variables())
 
-    # 3. Render directly to a standalone MP4 video using the compiler
+    # 3. Fill in values. Assignments are type-checked: a bad color raises immediately.
+    clip.set_variable("title", "Global Active Users")
+    clip.set_variable("value", "10.5M")
+    clip.set_variable("accent", "#22c55e")
+    clip.set_variable("progress", 84)
+    print("Still needed  :", clip.get_missing_required_variables(), "(after setting values)")
+
+    try:
+        clip.set_variable("accent", "not; a } color")
+    except ValueError as err:
+        print("Rejected bad color:", str(err).splitlines()[-1][:70])
+
     out_dir = Path("output")
     out_dir.mkdir(exist_ok=True)
-    video_out = out_dir / "stat_card.mp4"
-
     compiler = CodedVisualCompiler()
-    print("Rendering coded visual to video with headless Chrome + FFmpeg...")
-    rendered_path = compiler.render_to_video(clip, output_path=video_out, fps=30.0)
-    print(f"Rendered video saved to: {rendered_path}")
 
-    # 4. Integrate into a timeline and flatten into a concrete MediaClip
+    # 4. A still preview is cheap: one screenshot at the design size.
+    still = compiler.render_to_image(clip)
+    print(f"Still preview : {still}")
+
+    # 5. The full animation. Frames are stepped deterministically (identical on any machine)
+    #    and streamed to FFmpeg. Needs the optional 'playwright' package.
+    try:
+        video = compiler.render_to_video(clip, output_path=out_dir / "stat_card.mp4", fps=30.0)
+        print(f"Video         : {video}")
+    except vk.CodedVisualCompileError as err:
+        print(f"Video skipped : {err}")
+
+    # 6. On a timeline, the visual is just a clip. flatten() renders it (video if it moves,
+    #    PNG if it doesn't) and returns plain media clips. The original timeline is untouched.
     timeline = vk.Timeline()
     timeline.add_clip(clip)
-
-    flattened = timeline.flatten(render_video=True)
-    resolved_clip = flattened.video_tracks[0].clips[0]
-    print(f"Flattened clip type: {resolved_clip.clip_type}")
-    print(f"Resolved media source: {resolved_clip.source.source}")
+    try:
+        flat = timeline.flatten()
+        resolved = flat.video_tracks[0].clips[0]
+        print(f"Flattened     : {resolved.clip_type} -> {Path(resolved.source.source).name}")
+    except vk.CodedVisualCompileError as err:
+        print(f"Flatten skipped: {err}")
 
 
 if __name__ == "__main__":

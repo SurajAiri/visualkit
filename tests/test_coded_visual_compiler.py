@@ -185,8 +185,10 @@ def test_compiler_prepare_html_injections():
     # 3. Base tag injected for relative asset resolution
     assert '<base href="file:///custom/base/dir/">' in prepared
 
-    # 4. Aspect ratio locked viewport CSS injected
-    assert "aspect-ratio: 9:16;" in prepared
+    # 4. Aspect ratio locked viewport CSS injected. CSS requires `9 / 16`; the
+    # previous output `aspect-ratio: 9:16` is invalid CSS and was silently ignored.
+    assert "aspect-ratio: 9 / 16;" in prepared
+    assert "aspect-ratio: 9:16" not in prepared
     assert "width: 1080px;" in prepared
     assert "height: 1920px;" in prepared
 
@@ -202,18 +204,19 @@ def test_compiler_compile_end_to_end(tmp_path: Path, temp_templates_dir: Path):
         variables={"title": "Revenue 2026", "bar_color": "#10b981"},
     )
 
-    # Compile the clip
-    media_source = compiler.compile(clip)
+    # Compile the clip. The output must be real media, not the intermediate HTML.
+    media_source = compiler.compile(clip, render_video=False)
 
     assert clip.compile_status == CompileStatus.READY
     assert clip.media_source == media_source
-    assert Path(media_source).exists()
+    assert Path(media_source).suffix == ".png"
+    assert Path(media_source).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"  # a real PNG
 
-    # Verify compiled index.html contents
-    compiled_content = Path(media_source).read_text(encoding="utf-8")
-    assert "Revenue 2026" in compiled_content
-    assert "#10b981" in compiled_content
-    assert '<base href="' in compiled_content
+    # The prepared page it was rendered from carries the variables and asset base.
+    prepared_html = (Path(media_source).parent / "index.html").read_text(encoding="utf-8")
+    assert "Revenue 2026" in prepared_html
+    assert "#10b981" in prepared_html
+    assert '<base href="' in prepared_html
 
 
 @pytest.mark.asyncio
@@ -231,4 +234,4 @@ async def test_coded_visual_clip_async_resolve(temp_templates_dir: Path):
     assert resolved_media.timeline_start.seconds == 3.0
     assert resolved_media.duration.seconds == 7.0
     assert resolved_media.speed == 1.5
-    assert resolved_media.source.source.endswith("index.html")
+    assert resolved_media.source.source.endswith(".png")  # rendered media, never the html

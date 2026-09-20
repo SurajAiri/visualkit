@@ -163,7 +163,7 @@ def test_flatten_compound_timeline(sample_template_html: Path):
     assert isinstance(media_clip, MediaClip)
     assert media_clip.timeline_start.seconds == 5.0  # 4s (compound start) + 1s (inner start)
     assert media_clip.duration.seconds == 3.0
-    assert media_clip.source.source.endswith("index.html")
+    assert media_clip.source.source.endswith(".png")  # rendered still, not the html
 
     # Track 2: the compound's inner track 1 (expanded overlay text, 4s + 0.5s = 4.5s).
     v2_clips = flattened.video_tracks[2].clips
@@ -254,14 +254,12 @@ class TestCompoundSpeedRetiming:
     def test_2x_speed_compresses_child_position_and_duration(self):
         inner = Timeline()
         inner.add_clip(
-            TextClip(
-                id="t1", text="A", timeline_start=Time.from_seconds(2), duration=Time.from_seconds(4)
-            )
+            TextClip(id="t1", text="A", timeline_start=Time.from_seconds(2), duration=Time.from_seconds(4))
         )
         compound = CompoundClip(
             id="c1",
             timeline_start=Time.from_seconds(0),
-            duration=Time.from_seconds(4),
+            duration=Time.from_seconds(6),  # covers inner content [2s, 6s]
             speed=2.0,
             inner_timeline=inner,
         )
@@ -281,12 +279,10 @@ class TestCompoundSpeedRetiming:
         offset addition with no compression, matching pre-fix behavior."""
         inner = Timeline()
         inner.add_clip(
-            TextClip(
-                id="t1", text="A", timeline_start=Time.from_seconds(2), duration=Time.from_seconds(4)
-            )
+            TextClip(id="t1", text="A", timeline_start=Time.from_seconds(2), duration=Time.from_seconds(4))
         )
         compound = CompoundClip(
-            id="c1", timeline_start=Time.from_seconds(3), duration=Time.from_seconds(4), inner_timeline=inner
+            id="c1", timeline_start=Time.from_seconds(3), duration=Time.from_seconds(6), inner_timeline=inner
         )
 
         root = Timeline()
@@ -321,7 +317,7 @@ class TestCompoundSpeedRetiming:
         outer_compound = CompoundClip(
             id="outer",
             timeline_start=Time.zero(),
-            duration=Time.from_seconds(4),
+            duration=Time.from_seconds(6),  # covers the nested compound at local [4s, 6s]
             speed=2.0,
             inner_timeline=middle,
         )
@@ -342,14 +338,12 @@ class TestCompoundSpeedRetiming:
         """
         innermost = Timeline()
         innermost.add_clip(
-            TextClip(
-                id="deep", text="X", timeline_start=Time.from_seconds(6), duration=Time.from_seconds(12)
-            )
+            TextClip(id="deep", text="X", timeline_start=Time.from_seconds(6), duration=Time.from_seconds(12))
         )
         inner_compound = CompoundClip(
             id="inner_c",
             timeline_start=Time.from_seconds(1),
-            duration=Time.from_seconds(4),
+            duration=Time.from_seconds(18),  # covers "deep" at local [6s, 18s]
             speed=3.0,
             inner_timeline=innermost,
         )
@@ -360,7 +354,7 @@ class TestCompoundSpeedRetiming:
         outer_compound = CompoundClip(
             id="outer_c",
             timeline_start=Time.zero(),
-            duration=Time.from_seconds(4),
+            duration=Time.from_seconds(19),  # covers inner_c at local [1s, 19s]
             speed=2.0,
             inner_timeline=middle,
         )
@@ -387,7 +381,7 @@ class TestCompoundSpeedRetiming:
         compound = CompoundClip(
             id="c1",
             timeline_start=Time.zero(),
-            duration=Time.from_seconds(4),
+            duration=Time.from_seconds(6),  # covers the audio at local [2s, 6s]
             speed=2.0,
             inner_timeline=inner,
         )
@@ -400,5 +394,3 @@ class TestCompoundSpeedRetiming:
         assert clip.timeline_start.seconds == 1.0
         assert clip.duration.seconds == 2.0
         assert clip.speed == 2.0
-
-

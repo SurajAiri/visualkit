@@ -27,3 +27,45 @@ class InvalidTrackOperationError(VisualKitError):
 
 class TimelineValidationError(VisualKitError):
     """Raised when timeline integrity checks fail."""
+
+
+class CodedVisualError(VisualKitError):
+    """Base class for coded-visual problems."""
+
+
+class CodedVisualCompileError(CodedVisualError):
+    """Raised when a coded visual cannot be compiled/rendered into media."""
+
+
+class BrowserNotFoundError(CodedVisualCompileError):
+    """Raised when no usable Chrome/Chromium executable can be located."""
+
+
+class MissingSourceError(VisualKitError):
+    """Raised when a clip's source file cannot be found at export time."""
+
+
+class TemplateParameterError(VisualKitError):
+    """Raised when an exposed template parameter points at something that does not exist."""
+
+
+class ExportError(VisualKitError):
+    """Raised when an external encoder (ffmpeg) fails while exporting.
+
+    `returncode` and `stderr` carry the raw process details; `str(error)` is a
+    readable summary ending with the last lines of the tool's own output, which
+    is where ffmpeg actually says what went wrong.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        returncode: int | None = None,
+        stderr: str = "",
+        command: list[str] | None = None,
+    ):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+        self.command = command or []

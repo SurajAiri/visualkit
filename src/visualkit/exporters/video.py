@@ -1,3 +1,4 @@
+import hashlib
 import html
 import logging
 import shutil
@@ -10,23 +11,12 @@ from typing import Any
 from visualkit.exporters.base import BaseExporter
 from visualkit.models.clips.audio import AudioClip
 from visualkit.models.clips.media import MediaClip
-from visualkit.models.clips.text import TextClip
+from visualkit.models.clips.text import TEXT_REFERENCE_HEIGHT, TextClip
 from visualkit.models.clips.visual import Transform
 from visualkit.models.timeline import Timeline
-from visualkit.utils.exceptions import VisualKitError
+from visualkit.utils.exceptions import BrowserNotFoundError, ExportError, MissingSourceError, VisualKitError
 
 logger = logging.getLogger(__name__)
-
-
-class MissingSourceError(VisualKitError):
-    """Raised when a clip's source file cannot be found at export time.
-
-    Previously a missing source only logged a warning and the clip was
-    silently skipped, so `export()` would return a "successful" path
-    whose video is missing content the caller has no easy way to notice
-    short of watching the whole thing. Failing loudly means a bad export
-    is caught immediately rather than discovered later.
-    """
 
 
 @lru_cache(maxsize=256)
@@ -153,7 +143,17 @@ def _transform_filters(transform: Transform, width: int, height: int) -> tuple[s
         import math
 
         radians = math.radians(transform.rotation)
-        filters.append(f"rotate={radians}:c=black@0")
+        # `rotate` keeps the INPUT size unless told otherwise, which crops the
+        # rotated layer back to its pre-rotation box (a 90-degree turn of a wide
+        # frame lost 44% of its pixels). Give it the rotated bounding box, and
+        # report that as the effective size so the caller centres the overlay on it.
+        cos_a, sin_a = abs(math.cos(radians)), abs(math.sin(radians))
+        rot_w = math.ceil(effective_w * cos_a + effective_h * sin_a - 1e-6)
+        rot_h = math.ceil(effective_w * sin_a + effective_h * cos_a - 1e-6)
+        rot_w += rot_w % 2  # even dimensions keep centring exact for yuv formats
+        rot_h += rot_h % 2
+        filters.append(f"rotate={radians}:ow={rot_w}:oh={rot_h}:c=black@0")
+        effective_w, effective_h = rot_w, rot_h
 
     # 5. Opacity last, via colorchannelmixer scaling the alpha channel by
     # the 0-100 percent (as a 0.0-1.0 fraction).
@@ -204,7 +204,7 @@ class FFmpegVideoExporter(BaseExporter):
 
         # Flatten timeline and compile coded visuals into real video assets
 
-        flattened = timeline.flatten(render_video=True)
+        flattened = timeline.flatten(render_video=None)
         total_duration = max(flattened.duration.seconds, 1.0)
         width, height = self.resolution
 
@@ -258,8 +258,7 @@ class FFmpegVideoExporter(BaseExporter):
                 # to detect that short of inspecting the video by hand, so
                 # this now fails the whole export instead.
                 raise MissingSourceError(
-                    f"Cannot export: source file for clip '{clip.id}' was not found "
-                    f"({source_file})."
+                    f"Cannot export: source file for clip '{clip.id}' was not found ({source_file})."
                 )
 
             # Add input. For a MediaClip, -ss before -i seeks to
@@ -358,8 +357,7 @@ class FFmpegVideoExporter(BaseExporter):
             source_file = Path(resolved_a_src)
             if not source_file.exists():
                 raise MissingSourceError(
-                    f"Cannot export: source file for audio clip '{a_clip.id}' was not found "
-                    f"({source_file})."
+                    f"Cannot export: source file for audio clip '{a_clip.id}' was not found ({source_file})."
                 )
 
             source_start_s = a_clip.source.start.seconds
@@ -423,22 +421,33 @@ class FFmpegVideoExporter(BaseExporter):
             ]
         )
 
-        result = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
+        # Encode to a sibling temp file and rename on success, so a failed or
+        # interrupted export never leaves a truncated file at the user's path
+        # (or overwrites a previous good export with a broken one).
+        tmp_path = out_path.with_name(f".{out_path.stem}.part{out_path.suffix}")
+        cmd[-1] = str(tmp_path)
+
+        try:
+            result = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        except FileNotFoundError as err:
+            raise ExportError(
+                f"Cannot export: the '{cmd[0]}' executable was not found. "
+                "Install FFmpeg and make sure it is on PATH."
+            ) from err
+
         if result.returncode != 0:
-            # Previously stderr was discarded (DEVNULL), so a failure
-            # here surfaced only as a bare CalledProcessError with no
-            # indication of *why* ffmpeg rejected the input (a corrupt
-            # file, an unsupported codec, a filter error, etc.).
             stderr_text = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
-            raise subprocess.CalledProcessError(
-                result.returncode, cmd, output=None, stderr=stderr_text
+            if tmp_path.exists():
+                tmp_path.unlink()
+            tail = "\n".join(stderr_text.strip().splitlines()[-8:]) or "(ffmpeg produced no error output)"
+            raise ExportError(
+                f"FFmpeg failed (exit {result.returncode}) while exporting to {out_path.name}:\n{tail}",
+                returncode=result.returncode,
+                stderr=stderr_text,
+                command=cmd,
             )
 
+        tmp_path.replace(out_path)
         return out_path
 
     @staticmethod
@@ -486,69 +495,63 @@ class FFmpegVideoExporter(BaseExporter):
         filter_complex.append("".join(stages) + ",".join(parts) + label)
         return label
 
-    def _render_text_to_image(self, clip: TextClip, width: int, height: int) -> Path:
-        """Render a TextClip to a transparent PNG snapshot using Chrome for FFmpeg compositing.
+    @staticmethod
+    def _text_html(clip: TextClip, width: int, height: int) -> str:
+        """Standalone HTML for a TextClip, honouring every `TextStyle` field.
 
-        Raises RuntimeError if no Chrome/Chromium executable is available,
-        rather than silently returning the intermediate .html file as if it
-        were a usable image (which would previously reach ffmpeg as a
-        broken, unrecognized input).
+        All user-controlled strings are HTML-escaped; `font_family`, colors and
+        weight are additionally validated by `TextStyle` itself, so none of them
+        can break out of the inline style attribute.
         """
-        from visualkit.coded_visual.compiler import CodedVisualCompiler
-
-        font_size = getattr(clip.style, "font_size", 64) if hasattr(clip, "style") else 64
-        font_color = getattr(clip.style, "color", "#ffffff") if hasattr(clip, "style") else "#ffffff"
-
-        # Escape the user-supplied text (and defensively, the color, which
-        # is expected to be a CSS color string but should never be trusted
-        # to not contain markup) so that characters like <, >, & don't
-        # corrupt the layout or get interpreted as HTML. Also soft-wrap
-        # long text so it doesn't silently render off-canvas.
-        wrapped_lines = textwrap.wrap(str(clip.text), width=40) or [str(clip.text)]
+        style = clip.style
+        scale = height / TEXT_REFERENCE_HEIGHT
+        font_px = max(1, round(style.font_size * scale))
+        wrapped_lines = textwrap.wrap(str(clip.text), width=40, replace_whitespace=False) or [str(clip.text)]
         safe_text = "<br>".join(html.escape(line) for line in wrapped_lines)
-        safe_font_color = html.escape(str(font_color))
-
-        html_content = (
-            f"""<!DOCTYPE html>
-<html>
-<body style="margin:0;padding:0;background:transparent;width:100vw;height:100vh;"""
-            f"""display:flex;align-items:center;justify-content:center;">
-    <h1 style="margin:0;font-family:system-ui,-apple-system,sans-serif;"""
-            f"""font-size:{font_size}px;color:{safe_font_color};text-align:center;"""
-            f"""max-width:90vw;white-space:normal;overflow-wrap:break-word;">
-        {safe_text}
-    </h1>
-</body>
-</html>"""
+        justify = {"left": "flex-start", "center": "center", "right": "flex-end"}[style.alignment.value]
+        family = html.escape(style.font_family, quote=True)
+        bg = (
+            f"background:{html.escape(style.background_color, quote=True)};" if style.background_color else ""
         )
+        return (
+            '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+            '<body style="margin:0;padding:0;background:transparent;'
+            f"width:{width}px;height:{height}px;display:flex;align-items:center;"
+            f'justify-content:{justify};">'
+            f"<div style=\"font-family:'{family}',system-ui,-apple-system,sans-serif;"
+            f"font-size:{font_px}px;font-weight:{html.escape(style.weight, quote=True)};"
+            f"color:{html.escape(style.color, quote=True)};text-align:{style.alignment.value};"
+            f'{bg}padding:0 5vw;max-width:90vw;overflow-wrap:break-word;line-height:1.2;">'
+            f"{safe_text}</div></body></html>"
+        )
+
+    def _render_text_to_image(self, clip: TextClip, width: int, height: int) -> Path:
+        """Render a TextClip to a transparent PNG for FFmpeg compositing.
+
+        The cache filename is a hash of everything that affects the pixels
+        (text, full style, canvas size) -- *not* the clip id -- so editing a
+        clip's text can never serve a stale image, and two clips with
+        identical text/style share one render.
+        """
+        from visualkit.coded_visual import browser
+
+        html_content = self._text_html(clip, width, height)
+        digest = hashlib.sha256(f"{width}x{height}\0{html_content}".encode()).hexdigest()[:24]
 
         cache_dir = self.cache_dir.resolve()
         cache_dir.mkdir(parents=True, exist_ok=True)
-        html_file = cache_dir / f"{clip.id}.html"
-        out_png = cache_dir / f"{clip.id}.png"
+        html_file = cache_dir / f"text_{digest}.html"
+        out_png = cache_dir / f"text_{digest}.png"
+        if out_png.exists():
+            return out_png
+
         html_file.write_text(html_content, encoding="utf-8")
-
-        chrome_bin = CodedVisualCompiler._find_chrome_executable()
-        if not chrome_bin:
+        try:
+            browser.screenshot(html_file, out_png, width, height)
+        except BrowserNotFoundError as err:
             raise RuntimeError(
-                f"Cannot render TextClip '{clip.id}' to an image: no Google Chrome or "
-                "Chromium executable was found on this system. Text clips require a "
-                "headless-Chrome-capable browser to rasterize; install Chrome/Chromium "
-                "or avoid TextClips when exporting with FFmpegVideoExporter."
-            )
-
-        chrome_cmd = [
-            chrome_bin,
-            "--headless=new",
-            f"--screenshot={out_png}",
-            f"--window-size={width},{height}",
-            "--default-background-color=00000000",
-            html_file.as_uri(),
-        ]
-        subprocess.run(
-            chrome_cmd,
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+                f"Cannot render TextClip '{clip.id}' to an image: no Google Chrome or Chromium "
+                "executable was found. Text clips need a headless browser to rasterize; install "
+                "Chrome/Chromium, set VISUALKIT_CHROME, or avoid TextClips with FFmpegVideoExporter."
+            ) from err
         return out_png

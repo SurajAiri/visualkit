@@ -47,4 +47,3 @@ if __name__ == "__main__":
     print(f"Video tracks: {len(timeline.video_tracks)}")
     print(f"Audio tracks: {len(timeline.audio_tracks)}")
     print(f"Total duration: {timeline.duration}")
-

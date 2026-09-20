@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .audio import AudioProperties
 from .base import Source
@@ -18,6 +18,14 @@ class MediaClip(VisualClip):
     resolution: tuple[int, int] = Field(
         default=(1920, 1080), description="Resolution of the media clip (width, height)"
     )
+
+    @field_validator("resolution")
+    @classmethod
+    def _validate_resolution(cls, value: tuple[int, int]) -> tuple[int, int]:
+        width, height = value
+        if width <= 0 or height <= 0:
+            raise ValueError(f"resolution must be positive (width, height), got {value}")
+        return value
 
     # Whether/how to include this clip's own embedded audio stream (e.g. a
     # video file's soundtrack) in exports, distinct from any separate

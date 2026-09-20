@@ -4,7 +4,7 @@ from pydantic import Field
 
 from .audio import AudioClip, AudioProperties
 from .base import BaseClip, Position, Size, Source
-from .coded_visual import CodedVisualClip, CompileStatus
+from .coded_visual import CodedVisualClip, CompileStatus, RenderMode
 from .compound import CompoundAudioClip, CompoundClip, ExposedParameter
 from .media import MediaClip
 from .text import TextClip, TextStyle
@@ -26,6 +26,7 @@ __all__ = [
     "BaseClip",
     "CodedVisualClip",
     "CompileStatus",
+    "RenderMode",
     "ExposedParameter",
     "MediaClip",
     "Position",
