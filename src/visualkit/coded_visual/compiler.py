@@ -380,6 +380,30 @@ class CodedVisualCompiler:
         clip.compile_status = CompileStatus.READY
         return out
 
+    def preview_frame(self, clip: CodedVisualClip, time: float = 0.0, *, force: bool = False) -> Path:
+        """Render a single frame of `clip` at virtual time `time` seconds, without
+        encoding a video and without affecting `clip.media_source`/`compile_status`.
+
+        Cheap way to check an individual instant of an animated coded visual
+        (e.g. mid-way through its motion) before committing to a full
+        `render_to_video`/`compile()` call. Needs the optional `playwright`
+        package, same as `render_to_video`; still visuals can also just use
+        `render_to_image` (no browser-clock stepping needed for a static page).
+        Cached per `(cache_key, time)` under the bundle dir, so repeated
+        previews of the same frame are free.
+        """
+        from visualkit.coded_visual.capture import capture_frame
+
+        info = self._resolve_inputs(clip)
+        target_html, cache_key = self._write_bundle(clip, info)
+        # Slug the timestamp into the filename (3dp is sub-frame precision at any
+        # realistic fps) so distinct preview times don't collide or overwrite.
+        out = target_html.parent / f"preview_{max(0.0, time):.3f}.png"
+        if force or not out.exists():
+            width, height = int(info["canvas"].width), int(info["canvas"].height)
+            capture_frame(target_html, out, width, height, time=time, timeout=self.render_timeout)
+        return out
+
     def is_animated(self, clip: CodedVisualClip) -> bool:
         """Decide whether `clip` needs video (True) or a still image (False).
 

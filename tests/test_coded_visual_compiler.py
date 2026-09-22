@@ -133,6 +133,30 @@ def test_clip_load_manifest_integration(temp_templates_dir: Path):
     assert clip.variables["bar_color"].resolve_value() == "#4f46e5"
 
 
+def test_load_manifest_backfills_duration(temp_templates_dir: Path):
+    """`clip.duration` should reflect the manifest's declared duration (6.0s here)
+    once `load_manifest()` has run, without needing to compile -- previously
+    `clip.duration` stayed at its zero default even after loading a manifest
+    that declares one, silently disagreeing with what the compiler would
+    actually render for."""
+    bundle_dir = temp_templates_dir / "chart_bundle"
+    clip = CodedVisualClip(source=str(bundle_dir))
+
+    assert clip.duration.seconds == 0.0  # unset before load_manifest()
+    clip.load_manifest()
+    assert clip.duration.seconds == 6.0  # backfilled from manifest.json's "duration": 6.0
+
+
+def test_load_manifest_does_not_override_explicit_duration(temp_templates_dir: Path):
+    """An explicitly-set duration must win over the manifest's, matching the
+    precedence `load_manifest()` already documents for canvas_size/fps."""
+    bundle_dir = temp_templates_dir / "chart_bundle"
+    clip = CodedVisualClip(source=str(bundle_dir), duration=Time.from_seconds(9))
+
+    clip.load_manifest()
+    assert clip.duration.seconds == 9.0  # untouched, not overwritten by manifest's 6.0
+
+
 def test_compiler_deterministic_cache_key():
     key1 = CodedVisualCompiler.compute_cache_key(
         source_content="<div>test</div>",
@@ -217,6 +241,42 @@ def test_compiler_compile_end_to_end(tmp_path: Path, temp_templates_dir: Path):
     assert "Revenue 2026" in prepared_html
     assert "#10b981" in prepared_html
     assert '<base href="' in prepared_html
+
+
+def test_preview_frame_seeks_animation(tmp_path: Path):
+    """`preview_frame(t)` must render the page's actual state at virtual time
+    `t`, not always frame 0 -- and must not touch media_source/compile_status
+    (unlike compile()), since it's meant for cheap mid-animation checks
+    before committing to a real render."""
+    bundle_dir = tmp_path / "bar_grow"
+    bundle_dir.mkdir()
+    (bundle_dir / "index.html").write_text(
+        """<!DOCTYPE html>
+<html><head><meta name="canvas-size" content="400x200"></head>
+<body>
+<style>
+  .visualkit-canvas { background: #000; }
+  #bar { width: 0px; height: 40px; background: #f00; animation: grow 2s linear forwards; }
+  @keyframes grow { to { width: 400px; } }
+</style>
+<div class="visualkit-canvas"><div id="bar"></div></div>
+</body></html>
+""",
+        encoding="utf-8",
+    )
+    compiler = CodedVisualCompiler(cache_dir=tmp_path / "cache")
+    clip = CodedVisualClip(source=str(bundle_dir), duration=Time.from_seconds(2))
+
+    frame_start = clip.preview_frame(0.0, compiler=compiler)
+    frame_mid = clip.preview_frame(1.0, compiler=compiler)
+
+    assert frame_start.exists() and frame_mid.exists()
+    assert frame_start != frame_mid  # distinct cached files per timestamp
+    assert frame_start.read_bytes() != frame_mid.read_bytes()  # and genuinely different pixels
+
+    # preview_frame must not mark the clip as compiled / set its media
+    assert clip.compile_status == CompileStatus.PENDING
+    assert clip.media_source is None
 
 
 @pytest.mark.asyncio

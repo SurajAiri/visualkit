@@ -28,12 +28,13 @@ file for import into DaVinci Resolve.
 ## Installation
 
 ```bash
-pip install -e .              # core
-pip install -e ".[render]"    # + animated coded visuals
+pip install visualkit              # core
+pip install "visualkit[render]"    # + animated coded visuals
+
+# with uv
+# uv add visualkit
+# uv add visualkit[render]
 ```
-
-(This project isn't yet published to PyPI; install from a local checkout.)
-
 ## Quick start
 
 ```python

@@ -301,6 +301,14 @@ class CodedVisualClip(MediaClip):
             self.aspect_ratio = aspect_ratio_for(self.canvas_size.width, self.canvas_size.height)
         if manifest.fps and "fps" not in self.model_fields_set:
             self.fps = manifest.fps
+        # duration has no sentinel "unset" the way canvas_size/aspect_ratio do (its
+        # default is Time.zero(), a legitimate-looking value), so this only backfills
+        # when the clip's duration is exactly zero AND the caller never set it
+        # explicitly -- matching what the compiler falls back to at compile time
+        # (see CodedVisualCompiler._resolve_inputs), so `clip.duration` stops lying
+        # about how long the clip will actually render for.
+        if manifest.duration and self.duration.seconds == 0 and "duration" not in self.model_fields_set:
+            self.duration = Time.from_seconds(manifest.duration)
 
         for var_name, var in manifest.variables.items():
             existing = self.variables.get(var_name)
@@ -330,6 +338,23 @@ class CodedVisualClip(MediaClip):
             compiler = CodedVisualCompiler()
         compiler.compile(self, force=force)
         return self
+
+    def preview_frame(self, time: "Time | float" = 0.0, compiler: Any = None, *, force: bool = False) -> Path:
+        """Render one frame of this visual at `time` into the cache and return its PNG path.
+
+        A cheap way to check what this visual looks like partway through its
+        animation without encoding a full video or touching `media_source`/
+        `compile_status` (unlike `compile()`). `time` may be a `Time` or a
+        plain number of seconds; values past the visual's own duration still
+        render (the page's clock simply keeps advancing / animations hold
+        their end state). Needs the optional `playwright` package.
+        """
+        seconds = time.seconds if isinstance(time, Time) else float(time)
+        if compiler is None:
+            from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+            compiler = CodedVisualCompiler()
+        return compiler.preview_frame(self, seconds, force=force)
 
     async def _compile(self) -> None:
         """Async wrapper: runs the blocking compile in a worker thread so it doesn't stall an event loop."""

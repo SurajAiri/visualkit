@@ -184,6 +184,52 @@ def _abort(proc: subprocess.Popen, partial: Path) -> None:
             partial.unlink()
 
 
+def capture_frame(
+    html_path: Path,
+    out_png: Path,
+    width: int,
+    height: int,
+    *,
+    time: float = 0.0,
+    timeout: float = 60.0,
+) -> None:
+    """Render a single frame of `html_path` at virtual time `time` (seconds) to `out_png`.
+
+    Unlike `visualkit.coded_visual.browser.screenshot` (which always captures
+    at t=0 via the Chrome CLI), this seeks the page's virtual clock and every
+    CSS/Web Animation to `time` first -- the same deterministic stepping
+    `capture_video` uses per-frame -- so it can preview any instant of an
+    animated visual, not just its first frame. Needs the optional
+    ``playwright`` package; raises `CodedVisualCompileError` if it is missing
+    or the capture fails.
+    """
+    sync_playwright = _require_playwright()
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    # page.clock.run_for only accepts int (whole) ticks -- see capture_video's
+    # identical rounding, which avoids passing a bare float here.
+    ms = int(round(max(0.0, time) * 1000.0))
+
+    with sync_playwright() as pw:
+        pw_browser = _launch(pw)
+        try:
+            context, page = _new_page(pw_browser, html_path, width, height)
+            try:
+                if ms > 0:
+                    page.clock.run_for(ms)
+                page.evaluate(_SEEK_JS, float(ms))
+                png = page.screenshot(type="png", omit_background=True, animations="allow")
+            finally:
+                context.close()
+        except Exception as err:
+            raise CodedVisualCompileError(
+                f"Failed to capture frame of {html_path.name} at t={time}s: {err}"
+            ) from err
+        finally:
+            pw_browser.close()
+
+    out_png.write_bytes(png)
+
+
 def detect_motion(html_path: Path, width: int, height: int, *, timeout: float = 120.0) -> bool:
     """True if the page renders differently at two virtual times (i.e. it is animated).
 
