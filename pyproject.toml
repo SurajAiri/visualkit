@@ -9,17 +9,28 @@ description = "A programmable video-editing engine: timelines, compound clips, a
 readme = "README.md"
 authors = [{ name = "Suraj Airi", email = "surajairi.ml@gmail.com" }]
 license = { text = "MIT" }
-keywords = ["video", "editing", "timeline", "ffmpeg", "davinci-resolve", "fcpxml", "xmeml", "infographics"]
+keywords = [
+    "video",
+    "editing",
+    "timeline",
+    "ffmpeg",
+    "davinci-resolve",
+    "fcpxml",
+    "xmeml",
+    "infographics",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Video",
     "Typing :: Typed",
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = ["pydantic>=2.13.5"]
 
 [project.optional-dependencies]
@@ -56,4 +67,3 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "browser: drives a real headless Chrome/Chromium (skipped when none is installed)",
 ]
-
