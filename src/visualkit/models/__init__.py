@@ -9,6 +9,7 @@ from visualkit.models.clips import (
     CompoundAudioClip,
     CompoundClip,
     ExposedParameter,
+    LintIssue,
     MediaClip,
     Position,
     RenderMode,
@@ -21,6 +22,7 @@ from visualkit.models.clips import (
     VisualContent,
 )
 from visualkit.models.timeline import (
+    AddClipResult,
     AudioTrack,
     InsertMode,
     Timeline,
@@ -53,6 +55,7 @@ __all__ = [
     "CodedVisualClip",
     "CompileStatus",
     "RenderMode",
+    "LintIssue",
     "AudioClip",
     "AudioProperties",
     "CompoundClip",
@@ -66,6 +69,7 @@ __all__ = [
     "TrackKind",
     "Timeline",
     "InsertMode",
+    "AddClipResult",
     "Variable",
     "VariableType",
     "ExposedParameter",

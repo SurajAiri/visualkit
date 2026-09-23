@@ -29,16 +29,18 @@ from visualkit.models.clips.base import Size
 from visualkit.models.clips.coded_visual import (
     CodedVisualClip,
     CompileStatus,
+    LintIssue,
     RenderMode,
     aspect_ratio_for,
     parse_aspect_ratio,
 )
-from visualkit.utils.exceptions import CodedVisualCompileError
+from visualkit.utils.exceptions import CodedVisualCompileError, CodedVisualError
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][\w.\-]*)\s*\}\}")
 _RAW_PLACEHOLDER = re.compile(r"\{\{\{\s*([A-Za-z_][\w.\-]*)\s*\}\}\}")
 _HEAD_OPEN = re.compile(r"<head(\s[^>]*)?>", re.IGNORECASE)
 _HTML_OPEN = re.compile(r"<html(\s[^>]*)?>", re.IGNORECASE)
+_CANVAS_CLASS = re.compile(r'class\s*=\s*["\'][^"\']*\bvisualkit-canvas\b[^"\']*["\']', re.IGNORECASE)
 _STILL_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
 # Files inside a bundle that affect rendering; hashed into the cache key.
@@ -324,6 +326,76 @@ class CodedVisualCompiler:
         )
         return target_html, cache_key
 
+    # ------------------------------------------------------------------ lint
+    def lint(self, clip: CodedVisualClip) -> list[LintIssue]:
+        """Pure-Python pre-flight checks for `clip`, independent of Chrome.
+
+        Catches the majority of agent-authoring mistakes before spending a
+        browser launch on them: a missing `.visualkit-canvas` wrapper, a
+        `{{ variable }}`/`{{{ variable }}}` that doesn't match any declared
+        variable, or a source/manifest that fails to load at all. Returns a
+        list of `LintIssue`s (empty means nothing was found); never raises
+        for anything a real compile could hit -- those become an
+        "error"-severity issue instead.
+        """
+        issues: list[LintIssue] = []
+        try:
+            info = self._resolve_inputs(clip)
+        except CodedVisualError as err:
+            issues.append(LintIssue(severity="error", code="resolve_failed", message=str(err)))
+            return issues
+
+        raw_html = info["raw_html"]
+        variables = info["variables"]
+
+        if not _CANVAS_CLASS.search(raw_html):
+            issues.append(
+                LintIssue(
+                    severity="error",
+                    code="missing_canvas",
+                    message=(
+                        'No element with class="visualkit-canvas" found. Without it, '
+                        "auto-scaling/fit has nothing to act on and the render is likely "
+                        "blank or wrongly sized. Wrap the visual's root element, e.g. "
+                        '<div class="visualkit-canvas">...</div>.'
+                    ),
+                )
+            )
+
+        referenced: set[str] = set()
+        for pattern, braces in ((_RAW_PLACEHOLDER, "{{{ }}}"), (_PLACEHOLDER, "{{ }}")):
+            for match in pattern.finditer(raw_html):
+                name = match.group(1)
+                referenced.add(name)
+                if name not in variables:
+                    issues.append(
+                        LintIssue(
+                            severity="error",
+                            code="unresolved_variable",
+                            message=(
+                                f"{braces} placeholder references '{name}', which is not a "
+                                "declared clip or manifest variable -- it will render "
+                                f"literally as '{match.group(0)}' instead of being substituted."
+                            ),
+                        )
+                    )
+
+        unused = sorted(set(variables) - referenced)
+        if unused:
+            issues.append(
+                LintIssue(
+                    severity="warning",
+                    code="unused_variable",
+                    message=(
+                        f"Declared variable(s) {', '.join(unused)} aren't referenced by any "
+                        "{{ }}/{{{ }}} placeholder in the HTML. Fine if they're read from "
+                        "window.__VARIABLES__ in JavaScript instead."
+                    ),
+                )
+            )
+
+        return issues
+
     # ------------------------------------------------------------------ rendering
     @staticmethod
     def _find_chrome_executable() -> str | None:
@@ -341,6 +413,32 @@ class CodedVisualCompiler:
         clip.media_source = str(out)
         clip.compile_status = CompileStatus.READY
         return out
+
+    def preview_image(self, clip: CodedVisualClip, *, force: bool = False) -> Path:
+        """Render `clip` as a single still frame and return its PNG path,
+        without recording it as the clip's compiled media -- unlike
+        `render_to_image`, `clip.media_source`/`compile_status` are left
+        exactly as they were before the call.
+
+        This is the same lightweight Chrome-CLI screenshot `render_to_image`
+        uses (no `playwright` dependency), so it's the cheapest possible
+        correctness check for a coded visual's own HTML/CSS/variables --
+        e.g. a missing `.visualkit-canvas` wrapper or a malformed
+        `{{ variable }}` -- before spending a real `compile()` or timeline
+        round trip on it.
+
+        For an *animated* visual this is not a guaranteed frame-0 capture:
+        Chrome is given a `--virtual-time-budget` to run in before the
+        screenshot (see `browser.screenshot`), so an in-progress animation
+        may show partway through, same as `render_to_image` itself. Use
+        `preview_frame(0.0)` instead if you need a deterministic first
+        frame of an animated visual.
+        """
+        prev_status, prev_media = clip.compile_status, clip.media_source
+        try:
+            return self.render_to_image(clip, force=force)
+        finally:
+            clip.compile_status, clip.media_source = prev_status, prev_media
 
     def render_to_video(
         self,

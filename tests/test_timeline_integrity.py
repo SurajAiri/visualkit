@@ -239,3 +239,38 @@ class TestAddClipIsAllOrNothing:
         t = Timeline()
         t.add_clip(media_clip("a", 0, 1), media_clip("b", 1, 1), media_clip("c", 2, 1))
         assert [c.id for c in t.video_tracks[0].clips] == ["a", "b", "c"]
+
+
+class TestAddClipResult:
+    """`add_clip()` used to return None; it now reports what happened,
+    notably a CompoundClip's auto-created audio companion (see
+    TestCompanionAudio for the companion mechanism itself)."""
+
+    def test_plain_clip_has_no_companion(self):
+        t = Timeline()
+        result = t.add_clip(media_clip("a", 0, 5), track_index=2)
+        assert result.clip_ids == ["a"]
+        assert result.audio_companions == {}
+        assert result.video_track_index == 2
+        assert result.audio_track_index == 2
+        assert str(result) == "added clip 'a'"
+
+    def test_compound_clip_reports_its_companion(self):
+        t = Timeline()
+        result = t.add_clip(compound("logo"), track_index=1)
+        assert result.audio_companions == {"logo": "ca-logo"}
+        assert str(result) == "added clip 'logo' + audio companion 'ca-logo' on audio track 1"
+
+    def test_batch_reports_each_clip_and_only_compound_companions(self):
+        t = Timeline()
+        result = t.add_clip(media_clip("a", 0, 1), compound("logo", 1), track_index=0)
+        assert result.clip_ids == ["a", "logo"]
+        assert result.audio_companions == {"logo": "ca-logo"}
+        assert str(result) == "added clip 'a'; added clip 'logo' + audio companion 'ca-logo' on audio track 0"
+
+    def test_audio_clip_result_has_no_video_side_effect(self):
+        t = Timeline()
+        result = t.add_clip(AudioClip(id="snd", source="a.mp3", duration=Time(5)), track_index=0)
+        assert result.clip_ids == ["snd"]
+        assert result.audio_companions == {}
+        assert len(t.video_tracks) == 0

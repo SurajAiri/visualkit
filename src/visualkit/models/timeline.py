@@ -553,6 +553,43 @@ class AudioTrack(Track[AudioContent]):
     clips: list[AudioContent] = Field(default_factory=list)
 
 
+class AddClipResult(VisualKitModel):
+    """What `Timeline.add_clip()` actually did.
+
+    Exists because adding a `CompoundClip` has a side effect that isn't
+    visible from the call signature alone: it also creates a linked
+    `CompoundAudioClip` on the audio lane. `audio_companions` reports that
+    mapping so a caller reasoning purely from `add_clip(clip, track_index=N)`
+    can discover it without reading source. `str(result)` renders it as a
+    one-line summary, e.g. ``"added clip 'x' + audio companion 'ca-x' on
+    audio track 0"``.
+    """
+
+    clip_ids: list[str] = Field(description="IDs of every clip passed to add_clip, in call order.")
+    video_track_index: int = Field(description="Video track index visual clips were routed to.")
+    audio_track_index: int = Field(description="Audio track index audio clips/companions were routed to.")
+    audio_companions: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "clip_id -> the id of its auto-created CompoundAudioClip, for every "
+            "CompoundClip in this call. Empty when no CompoundClip was added."
+        ),
+    )
+
+    def __str__(self) -> str:
+        parts = []
+        for clip_id in self.clip_ids:
+            companion_id = self.audio_companions.get(clip_id)
+            if companion_id:
+                parts.append(
+                    f"added clip '{clip_id}' + audio companion '{companion_id}' "
+                    f"on audio track {self.audio_track_index}"
+                )
+            else:
+                parts.append(f"added clip '{clip_id}'")
+        return "; ".join(parts) if parts else "added no clips"
+
+
 class Timeline(VisualKitModel):
     """Owns all video and audio tracks."""
 
@@ -618,7 +655,7 @@ class Timeline(VisualKitModel):
         track_index: int = 0,
         mode: InsertMode = InsertMode.OVERLAP,
         validate: bool = False,
-    ) -> None:
+    ) -> AddClipResult:
         """Add clips directly to the timeline, automatically routing by clip type.
 
         If `track_index` is beyond the current number of tracks, tracks are
@@ -629,6 +666,12 @@ class Timeline(VisualKitModel):
         `validate` (default False, for backwards compatibility) is passed
         through to each underlying `Track.add_clip` call -- see its
         docstring for what it checks in OVERLAP vs RIPPLE mode.
+
+        Returns an `AddClipResult` reporting what was actually added --
+        notably, adding a `CompoundClip` also creates a linked
+        `CompoundAudioClip` on the audio lane at `track_index`, which
+        `result.audio_companions` surfaces (`str(result)` gives a one-line
+        summary); this isn't visible from the call signature otherwise.
         """
         if track_index < 0:
             raise ValueError("track_index must be non-negative")
@@ -651,14 +694,19 @@ class Timeline(VisualKitModel):
         # leaves the earlier clips of the batch behind.
         snapshot = self._snapshot(clips)
         try:
-            self._add_clips(clips, track_index, mode, validate)
+            result = self._add_clips(clips, track_index, mode, validate)
         except BaseException:
             self._restore(snapshot)
             raise
+        return result
 
-    def _add_clips(self, clips: tuple[Clip, ...], track_index: int, mode: InsertMode, validate: bool) -> None:
+    def _add_clips(
+        self, clips: tuple[Clip, ...], track_index: int, mode: InsertMode, validate: bool
+    ) -> AddClipResult:
         video_track_index = track_index
         audio_track_index = track_index
+        clip_ids: list[str] = []
+        audio_companions: dict[str, str] = {}
 
         for clip in clips:
             if clip.clip_type in ("media", "text", "coded_visual", "compound"):
@@ -673,12 +721,22 @@ class Timeline(VisualKitModel):
                 self.video_tracks[video_track_index].add_clip(clip, mode=mode, validate=validate)
                 if is_compound:
                     self.audio_tracks[audio_track_index].add_clip(companion, mode=mode, validate=validate)
+                    audio_companions[clip.id] = companion.id
                 if mode == InsertMode.RIPPLE:
                     self.sync_companions()
+                clip_ids.append(clip.id)
 
             elif clip.clip_type in ("audio", "compound_audio"):
                 self._ensure_tracks("audio", audio_track_index)
                 self.audio_tracks[audio_track_index].add_clip(clip, mode=mode, validate=validate)
+                clip_ids.append(clip.id)
+
+        return AddClipResult(
+            clip_ids=clip_ids,
+            video_track_index=video_track_index,
+            audio_track_index=audio_track_index,
+            audio_companions=audio_companions,
+        )
 
     def _snapshot(self, incoming: tuple[Clip, ...]) -> dict[str, Any]:
         """Capture everything an add can change: track lists, clip order, and clip timing."""

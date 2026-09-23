@@ -295,3 +295,97 @@ async def test_coded_visual_clip_async_resolve(temp_templates_dir: Path):
     assert resolved_media.duration.seconds == 7.0
     assert resolved_media.speed == 1.5
     assert resolved_media.source.source.endswith(".png")  # rendered media, never the html
+
+
+class TestLint:
+    """`lint()` must never touch a browser and never raise for anything a
+    real compile could hit -- everything becomes a returned LintIssue."""
+
+    @staticmethod
+    def _bundle(tmp_path: Path, body: str) -> Path:
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        (bundle / "index.html").write_text(
+            f'<!DOCTYPE html>\n<html><head><meta name="canvas-size" content="400x200"></head>\n'
+            f"<body>{body}</body></html>\n",
+            encoding="utf-8",
+        )
+        return bundle
+
+    def test_clean_visual_has_no_issues(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><h1>{{ headline }}</h1></div>')
+        clip = CodedVisualClip(
+            source=str(bundle), duration=Time.from_seconds(2), variables={"headline": "Hi"}
+        )
+        assert clip.lint() == []
+
+    def test_missing_canvas_wrapper_is_an_error(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="wrapper"><h1>Static</h1></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.lint()
+        assert any(i.code == "missing_canvas" and i.severity == "error" for i in issues)
+
+    def test_canvas_class_among_other_classes_is_detected(self, tmp_path: Path):
+        """The class attribute may hold more than one token."""
+        bundle = self._bundle(tmp_path, '<div class="card visualkit-canvas dark"><h1>Static</h1></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert not any(i.code == "missing_canvas" for i in clip.lint())
+
+    def test_typo_d_variable_is_an_unresolved_error(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><h1>{{ headlien }}</h1></div>')
+        clip = CodedVisualClip(
+            source=str(bundle), duration=Time.from_seconds(2), variables={"headline": "Hi"}
+        )
+        issues = clip.lint()
+        unresolved = [i for i in issues if i.code == "unresolved_variable"]
+        assert len(unresolved) == 1
+        assert unresolved[0].severity == "error"
+        assert "headlien" in unresolved[0].message
+
+    def test_raw_placeholder_variable_is_checked_too(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas">{{{ raw_html_block }}}</div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.lint()
+        assert any(i.code == "unresolved_variable" and "raw_html_block" in i.message for i in issues)
+
+    def test_declared_but_unreferenced_variable_is_only_a_warning(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><h1>Static</h1></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2), variables={"unused": "x"})
+        issues = clip.lint()
+        assert [(i.code, i.severity) for i in issues] == [("unused_variable", "warning")]
+
+    def test_missing_source_becomes_an_issue_not_an_exception(self, tmp_path: Path):
+        clip = CodedVisualClip(source=str(tmp_path / "nope"), duration=Time.from_seconds(2))
+        issues = clip.lint()
+        assert len(issues) == 1
+        assert issues[0].code == "resolve_failed"
+        assert issues[0].severity == "error"
+
+    def test_missing_required_variable_becomes_an_issue_not_an_exception(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas">{{ headline }}</div>')
+        clip = CodedVisualClip(
+            source=str(bundle),
+            duration=Time.from_seconds(2),
+            variables={"headline": Variable(name="headline", value=None, required=True)},
+        )
+        issues = clip.lint()
+        assert any(i.code == "resolve_failed" for i in issues)
+
+    def test_lint_never_touches_media_source_or_compile_status(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="wrapper">{{ typo }}</div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        clip.lint()
+        assert clip.compile_status == CompileStatus.PENDING
+        assert clip.media_source is None
+
+    def test_lint_never_launches_a_browser(self, tmp_path: Path, monkeypatch):
+        """Pins the headline claim: this must work with zero Chrome/Chromium
+        on the machine at all."""
+        from visualkit.coded_visual import browser
+
+        monkeypatch.setattr(browser, "find_chrome", lambda: None)
+        bundle = self._bundle(tmp_path, '<div class="wrapper">{{ typo }}</div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.lint()  # would raise BrowserNotFoundError if this touched Chrome
+        assert any(i.code == "missing_canvas" for i in issues)
+

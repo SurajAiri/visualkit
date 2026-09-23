@@ -28,6 +28,7 @@ from pydantic import Field, field_validator, model_validator
 
 from visualkit.models.clips.base import Size, Source
 from visualkit.models.variable import Variable, VariableType, infer_variable_type
+from visualkit.utils.base_model import VisualKitModel
 from visualkit.utils.time import Time
 
 from .media import MediaClip
@@ -70,6 +71,24 @@ class RenderMode(str, Enum):
     AUTO = "auto"  # still if the page has no motion, video otherwise
     IMAGE = "image"  # always a single PNG frame
     VIDEO = "video"  # always an animated video
+
+
+class LintIssue(VisualKitModel):
+    """One problem found by `CodedVisualClip.lint()`.
+
+    `severity="error"` means the render is very likely blank, wrong, or
+    will fail outright; `"warning"` means it's worth a look but may be
+    intentional (e.g. a variable that's only read from JavaScript).
+    """
+
+    severity: Literal["error", "warning"] = Field(description="How serious this issue is.")
+    code: str = Field(
+        description=(
+            "Short machine-readable identifier for this kind of issue, e.g. "
+            "'missing_canvas', 'unresolved_variable', 'unused_variable', 'resolve_failed'."
+        )
+    )
+    message: str = Field(description="Human-readable description of the problem.")
 
 
 class CodedVisualClip(MediaClip):
@@ -338,6 +357,46 @@ class CodedVisualClip(MediaClip):
             compiler = CodedVisualCompiler()
         compiler.compile(self, force=force)
         return self
+
+    def lint(self, compiler: Any = None) -> list[LintIssue]:
+        """Pure-Python pre-flight checks, independent of Chrome, and return
+        a list of `LintIssue`s (empty means nothing was found).
+
+        Checks: the source/manifest load and every declared-required
+        variable is resolved (same checks `compile()` would hit), a
+        `class="visualkit-canvas"` element is present, and every
+        `{{ variable }}` / `{{{ variable }}}` placeholder in the HTML
+        matches a declared variable. Never raises for anything a real
+        compile could hit -- those become "error"-severity issues instead
+        -- so it's safe to call speculatively before deciding whether to
+        compile at all. Catches the majority of agent-authoring mistakes
+        before spending a browser launch on them.
+        """
+        if compiler is None:
+            from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+            compiler = CodedVisualCompiler()
+        return compiler.lint(self)
+
+    def preview_image(self, compiler: Any = None, *, force: bool = False) -> Path:
+        """Render this visual as a single still PNG and return its path,
+        without compiling it (`media_source`/`compile_status` are left
+        untouched).
+
+        The forced-still counterpart to `compile()`/`preview_frame`:
+        always takes the same cheap Chrome-CLI screenshot path
+        `render_to_image` uses (no `playwright` package needed), regardless
+        of `render_mode` or whether the page is animated. A quick way to
+        catch a missing `.visualkit-canvas`, a malformed `{{ variable }}`,
+        or broken layout before spending a full `compile()` or timeline
+        round trip on it. For a deterministic look at a specific instant of
+        an animated visual, use `preview_frame(t)` instead.
+        """
+        if compiler is None:
+            from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+            compiler = CodedVisualCompiler()
+        return compiler.preview_image(self, force=force)
 
     def preview_frame(self, time: "Time | float" = 0.0, compiler: Any = None, *, force: bool = False) -> Path:
         """Render one frame of this visual at `time` into the cache and return its PNG path.

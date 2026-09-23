@@ -1,5 +1,6 @@
 import re
 from enum import Enum
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -87,3 +88,26 @@ class TextClip(VisualClip):
     style: TextStyle = Field(
         default_factory=TextStyle, description="Typography and styling options for the text clip"
     )
+
+    def preview_image(
+        self,
+        *,
+        resolution: tuple[int, int] | None = None,
+        cache_dir: "str | Path | None" = None,
+    ) -> Path:
+        """Render this clip to a transparent PNG and return its path.
+
+        Uses the same Chrome-based rasterizer `FFmpegVideoExporter` uses to
+        turn a `TextClip` into an image for export, so what you see here is
+        exactly what export will draw for this clip's own text/style -- not
+        how it looks composited over whatever's beneath it on a timeline.
+        `resolution` defaults to a 1920x1080 canvas (`font_size` is defined
+        against a fixed 1080p reference height regardless of canvas size,
+        see `TEXT_REFERENCE_HEIGHT`, so this only changes overall pixel
+        density, not the text's proportions). `cache_dir` defaults to the
+        exporter's own rendered-text cache, so previewing a clip and then
+        exporting it don't render it twice.
+        """
+        from visualkit.exporters.single_clip import preview_text_image
+
+        return preview_text_image(self, resolution=resolution, cache_dir=cache_dir)
