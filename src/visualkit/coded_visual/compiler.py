@@ -43,6 +43,30 @@ _HTML_OPEN = re.compile(r"<html(\s[^>]*)?>", re.IGNORECASE)
 _CANVAS_CLASS = re.compile(r'class\s*=\s*["\'][^"\']*\bvisualkit-canvas\b[^"\']*["\']', re.IGNORECASE)
 _STILL_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp"}
 
+# What validate_bundle() treats as "a reference to a local file": the usual
+# HTML attributes that load an asset, and CSS url(...). Regex-based, like
+# every other check in this file -- not a full HTML/CSS parser, so an
+# unusual construct (e.g. a URL built up by JavaScript) can be missed.
+_LOCAL_ASSET_ATTR = re.compile(
+    r'\b(?:src|href|poster)\s*=\s*(?P<q>["\'])(?P<url>[^"\']+)(?P=q)', re.IGNORECASE
+)
+_CSS_URL = re.compile(r'url\(\s*(?P<q>["\']?)(?P<url>[^"\')]+)(?P=q)\s*\)', re.IGNORECASE)
+_URL_HAS_SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
+
+def _is_local_reference(url: str) -> bool:
+    """True if `url` looks like a relative reference to a file next to the
+    bundle's entrypoint, rather than a remote URL, a data URI, an anchor,
+    or an unresolved `{{ variable }}`."""
+    url = url.strip()
+    if not url or url.startswith("#"):
+        return False
+    if _PLACEHOLDER.search(url) or _RAW_PLACEHOLDER.search(url):
+        return False  # substituted at render time; nothing to check here yet
+    if url.startswith("//") or _URL_HAS_SCHEME.match(url):
+        return False  # protocol-relative or scheme:// (http, https, data, mailto, ...)
+    return True
+
 # Files inside a bundle that affect rendering; hashed into the cache key.
 _BUNDLE_HASH_LIMIT_BYTES = 64 * 1024 * 1024
 
@@ -327,16 +351,65 @@ class CodedVisualCompiler:
         return target_html, cache_key
 
     # ------------------------------------------------------------------ lint
+    def validate_bundle(self, clip: CodedVisualClip) -> list[LintIssue]:
+        """Check that every local asset the bundle's HTML/CSS references
+        (an `<img src="logo.svg">`, a CSS `url(chart.js)`, ...) actually
+        exists next to the entrypoint. Pure Python, no Chrome.
+
+        A no-op (always `[]`) for a single-file HTML source -- there's
+        nothing beside it to reference. For a directory bundle, a missing
+        asset otherwise only surfaces as a broken `<img>`/404 in the
+        render, not an error.
+
+        Only scans the entrypoint HTML itself, not files it links to --
+        `url(...)` inside a separately-linked `style.css` isn't followed,
+        so a bad reference three files deep can still slip through.
+        """
+        issues: list[LintIssue] = []
+        try:
+            info = self._resolve_inputs(clip)
+        except CodedVisualError as err:
+            issues.append(LintIssue(severity="error", code="resolve_failed", message=str(err)))
+            return issues
+
+        if not Path(clip.source.source).expanduser().resolve().is_dir():
+            return issues
+
+        bundle_dir = info["entrypoint"].parent
+        raw_html = info["raw_html"]
+        checked: set[str] = set()
+        for pattern in (_LOCAL_ASSET_ATTR, _CSS_URL):
+            for match in pattern.finditer(raw_html):
+                url = match.group("url")
+                if not _is_local_reference(url) or url in checked:
+                    continue
+                checked.add(url)
+                relative_path = url.split("?", 1)[0].split("#", 1)[0]
+                asset_path = (bundle_dir / relative_path).resolve()
+                if not asset_path.exists():
+                    issues.append(
+                        LintIssue(
+                            severity="error",
+                            code="missing_asset",
+                            message=(
+                                f"Referenced local asset '{url}' does not exist (expected at "
+                                f"{asset_path}, alongside {info['entrypoint'].name})."
+                            ),
+                        )
+                    )
+        return issues
+
     def lint(self, clip: CodedVisualClip) -> list[LintIssue]:
         """Pure-Python pre-flight checks for `clip`, independent of Chrome.
 
         Catches the majority of agent-authoring mistakes before spending a
         browser launch on them: a missing `.visualkit-canvas` wrapper, a
         `{{ variable }}`/`{{{ variable }}}` that doesn't match any declared
-        variable, or a source/manifest that fails to load at all. Returns a
-        list of `LintIssue`s (empty means nothing was found); never raises
-        for anything a real compile could hit -- those become an
-        "error"-severity issue instead.
+        variable, a referenced local asset that doesn't exist (see
+        `validate_bundle`), or a source/manifest that fails to load at
+        all. Returns a list of `LintIssue`s (empty means nothing was
+        found); never raises for anything a real compile could hit --
+        those become an "error"-severity issue instead.
         """
         issues: list[LintIssue] = []
         try:
@@ -394,6 +467,7 @@ class CodedVisualCompiler:
                 )
             )
 
+        issues.extend(self.validate_bundle(clip))
         return issues
 
     # ------------------------------------------------------------------ rendering

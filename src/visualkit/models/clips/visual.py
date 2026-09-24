@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field
 
@@ -92,6 +92,24 @@ class Transform(VisualKitModel):
             and self.zoom == 1
             and self.opacity == 100
         )
+
+    @classmethod
+    def at_anchor(
+        cls,
+        anchor: str,
+        margin: float = 0.0,
+        *,
+        canvas_size: tuple[float, float] = (1920.0, 1080.0),
+        **kwargs: Any,
+    ) -> "Transform":
+        """Build a `Transform` positioned at one of `Position`'s 9 standard
+        screen anchors -- see `Position.from_anchor` for `anchor`,
+        `margin`, and `canvas_size`. Any other `Transform` field can be
+        passed through as a keyword, e.g.
+        `Transform.at_anchor("bottom", margin=80, scale=0.9)` for a
+        caption sitting 80px above the bottom edge at 90% size.
+        """
+        return cls(position=Position.from_anchor(anchor, margin, canvas_size=canvas_size), **kwargs)
 
 
 class VisualClip(BaseClip):

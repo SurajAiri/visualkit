@@ -389,3 +389,99 @@ class TestLint:
         issues = clip.lint()  # would raise BrowserNotFoundError if this touched Chrome
         assert any(i.code == "missing_canvas" for i in issues)
 
+
+class TestValidateBundle:
+    """`validate_bundle()` must never touch a browser, and must be a no-op
+    for a single-file source (nothing to reference)."""
+
+    @staticmethod
+    def _bundle(tmp_path: Path, html: str, extra_files: dict[str, bytes] | None = None) -> Path:
+        bundle = tmp_path / "bundle"
+        bundle.mkdir()
+        (bundle / "index.html").write_text(
+            f'<!DOCTYPE html>\n<html><head><meta name="canvas-size" content="400x200"></head>\n'
+            f"<body>{html}</body></html>\n",
+            encoding="utf-8",
+        )
+        for name, content in (extra_files or {}).items():
+            (bundle / name).write_bytes(content)
+        return bundle
+
+    def test_missing_image_is_an_error(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><img src="logo.svg"></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.validate_bundle()
+        assert len(issues) == 1
+        assert issues[0].code == "missing_asset"
+        assert issues[0].severity == "error"
+        assert "logo.svg" in issues[0].message
+
+    def test_existing_asset_is_not_flagged(self, tmp_path: Path):
+        bundle = self._bundle(
+            tmp_path,
+            '<div class="visualkit-canvas"><img src="logo.svg"></div>',
+            extra_files={"logo.svg": b"<svg></svg>"},
+        )
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert clip.validate_bundle() == []
+
+    def test_remote_and_data_uri_references_are_ignored(self, tmp_path: Path):
+        bundle = self._bundle(
+            tmp_path,
+            '<div class="visualkit-canvas">'
+            '<img src="https://example.com/remote.png">'
+            '<img src="//cdn.example.com/x.png">'
+            '<img src="data:image/png;base64,AAAA">'
+            "</div>",
+        )
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert clip.validate_bundle() == []
+
+    def test_unresolved_placeholder_reference_is_skipped_not_flagged(self, tmp_path: Path):
+        bundle = self._bundle(
+            tmp_path, '<div class="visualkit-canvas"><img src="{{ dynamic_icon }}"></div>'
+        )
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert clip.validate_bundle() == []
+
+    def test_css_url_is_checked_too(self, tmp_path: Path):
+        bundle = self._bundle(
+            tmp_path,
+            '<style>.visualkit-canvas{background:url(bg.png)}</style><div class="visualkit-canvas">x</div>',
+        )
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.validate_bundle()
+        assert any(i.code == "missing_asset" and "bg.png" in i.message for i in issues)
+
+    def test_a_linked_stylesheets_own_url_references_are_not_followed(self, tmp_path: Path):
+        """Documents the real scope limit: only the entrypoint HTML is
+        scanned, not files it links to."""
+        bundle = self._bundle(
+            tmp_path,
+            '<link rel="stylesheet" href="style.css"><div class="visualkit-canvas">x</div>',
+            extra_files={"style.css": b".visualkit-canvas{background:url(nope.png)}"},
+        )
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert clip.validate_bundle() == []  # style.css itself exists; its interior isn't scanned
+
+    def test_single_file_source_is_a_no_op(self, tmp_path: Path):
+        single = tmp_path / "standalone.html"
+        single.write_text(
+            '<html><body><div class="visualkit-canvas"><img src="nope.png"></div></body></html>'
+        )
+        clip = CodedVisualClip(source=str(single), duration=Time.from_seconds(2))
+        assert clip.validate_bundle() == []
+
+    def test_included_automatically_in_lint(self, tmp_path: Path):
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><img src="logo.svg"></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        assert any(i.code == "missing_asset" for i in clip.lint())
+
+    def test_never_launches_a_browser(self, tmp_path: Path, monkeypatch):
+        from visualkit.coded_visual import browser
+
+        monkeypatch.setattr(browser, "find_chrome", lambda: None)
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><img src="logo.svg"></div>')
+        clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
+        issues = clip.validate_bundle()  # would raise BrowserNotFoundError if this touched Chrome
+        assert any(i.code == "missing_asset" for i in issues)

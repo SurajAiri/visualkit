@@ -22,6 +22,48 @@ class Position(VisualKitModel):
     x: float = Field(default=0.0, description="Horizontal offset in target-canvas pixels from center")
     y: float = Field(default=0.0, description="Vertical offset in target-canvas pixels from center")
 
+    #: The 9 standard screen anchors `from_anchor` accepts, mapped to the
+    #: (horizontal, vertical) direction each pushes away from center.
+    _ANCHORS: ClassVar[dict[str, tuple[float, float]]] = {
+        "center": (0, 0),
+        "top": (0, -1),
+        "bottom": (0, 1),
+        "left": (-1, 0),
+        "right": (1, 0),
+        "top-left": (-1, -1),
+        "top-right": (1, -1),
+        "bottom-left": (-1, 1),
+        "bottom-right": (1, 1),
+    }
+
+    @classmethod
+    def from_anchor(
+        cls, anchor: str, margin: float = 0.0, *, canvas_size: tuple[float, float] = (1920.0, 1080.0)
+    ) -> "Position":
+        """Build a `Position` for one of the 9 standard screen anchors
+        (`"center"`, `"top"`, `"bottom"`, `"left"`, `"right"`,
+        `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"`),
+        `margin` pixels in from that edge (ignored for `"center"`).
+
+        Replaces manually computing e.g. `Position(y=canvas_height/2 - 80)`
+        to hit "80px above the bottom edge." `canvas_size` defaults to
+        VisualKit's standard 1920x1080 export resolution -- pass your real
+        target size explicitly if you're exporting to something else, the
+        same way you would with any other target-canvas-pixel value (see
+        the class docstring); the result is only correct for the
+        `canvas_size` it was computed against, it does not auto-rescale if
+        you later export at a different resolution.
+        """
+        key = anchor.strip().lower()
+        try:
+            dx, dy = cls._ANCHORS[key]
+        except KeyError:
+            raise ValueError(
+                f"Unrecognized anchor {anchor!r}. Expected one of: {', '.join(sorted(cls._ANCHORS))}."
+            ) from None
+        width, height = canvas_size
+        return cls(x=dx * (width / 2 - margin), y=dy * (height / 2 - margin))
+
 
 class Size(VisualKitModel):
     """Explicit width/height for a visual clip's transform, in pixels of the

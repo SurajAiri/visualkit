@@ -358,19 +358,37 @@ class CodedVisualClip(MediaClip):
         compiler.compile(self, force=force)
         return self
 
+    def validate_bundle(self, compiler: Any = None) -> list[LintIssue]:
+        """Check that every local asset this bundle's HTML/CSS references
+        (an `<img src="logo.svg">`, a CSS `url(chart.js)`, ...) actually
+        exists next to the entrypoint. Pure Python, no Chrome; always `[]`
+        for a single-file HTML source. Only scans the entrypoint HTML
+        itself, not files it links to (a linked `style.css`'s own
+        `url(...)` isn't followed). Included automatically in `lint()`'s
+        output -- call this directly if you only want the asset check on
+        its own.
+        """
+        if compiler is None:
+            from visualkit.coded_visual.compiler import CodedVisualCompiler
+
+            compiler = CodedVisualCompiler()
+        return compiler.validate_bundle(self)
+
     def lint(self, compiler: Any = None) -> list[LintIssue]:
         """Pure-Python pre-flight checks, independent of Chrome, and return
         a list of `LintIssue`s (empty means nothing was found).
 
         Checks: the source/manifest load and every declared-required
         variable is resolved (same checks `compile()` would hit), a
-        `class="visualkit-canvas"` element is present, and every
+        `class="visualkit-canvas"` element is present, every
         `{{ variable }}` / `{{{ variable }}}` placeholder in the HTML
-        matches a declared variable. Never raises for anything a real
-        compile could hit -- those become "error"-severity issues instead
-        -- so it's safe to call speculatively before deciding whether to
-        compile at all. Catches the majority of agent-authoring mistakes
-        before spending a browser launch on them.
+        matches a declared variable, and (for a directory bundle) every
+        referenced local asset exists (see `validate_bundle`). Never
+        raises for anything a real compile could hit -- those become
+        "error"-severity issues instead -- so it's safe to call
+        speculatively before deciding whether to compile at all. Catches
+        the majority of agent-authoring mistakes before spending a
+        browser launch on them.
         """
         if compiler is None:
             from visualkit.coded_visual.compiler import CodedVisualCompiler

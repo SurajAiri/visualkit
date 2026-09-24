@@ -3,6 +3,7 @@ from importlib.metadata import PackageNotFoundError, version
 from visualkit.engine import AssetResolver, DictAssetResolver, TimelinePipeline
 from visualkit.exporters import BaseExporter, DaVinciResolveExporter, FFmpegVideoExporter
 from visualkit.models import (
+    AddClipResult,
     AudioClip,
     AudioContent,
     AudioProperties,
@@ -15,6 +16,7 @@ from visualkit.models import (
     CompoundClip,
     ExposedParameter,
     InsertMode,
+    LintIssue,
     MediaClip,
     Position,
     RenderMode,
@@ -52,6 +54,7 @@ except PackageNotFoundError:  # running from a source checkout that is not insta
 
 __all__ = [
     "__version__",
+    "AddClipResult",
     "AudioClip",
     "AudioContent",
     "AudioProperties",
@@ -64,6 +67,7 @@ __all__ = [
     "CompoundClip",
     "ExposedParameter",
     "InsertMode",
+    "LintIssue",
     "MediaClip",
     "Position",
     "RenderMode",
