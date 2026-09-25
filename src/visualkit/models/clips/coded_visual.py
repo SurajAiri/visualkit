@@ -20,6 +20,7 @@ resolution therefore rescales the picture instead of re-laying it out.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -32,6 +33,7 @@ from visualkit.utils.base_model import VisualKitModel
 from visualkit.utils.time import Time
 
 from .media import MediaClip
+from .visual import VisualClip
 
 _ASPECT_RE = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[:/]\s*(\d+(?:\.\d+)?)\s*$")
 
@@ -457,17 +459,17 @@ class CodedVisualClip(MediaClip):
             ".gif",
             ".svg",
         }
+        # Copy EVERY VisualClip field generically (id, timing, transform, keyframes, and whatever
+        # gets added later) rather than naming them one by one: a named list silently drops any
+        # field added to VisualClip afterwards. tests/test_visual_clip_fields.py enforces this.
+        carried = {name: deepcopy(getattr(self, name)) for name in VisualClip.model_fields}
         return MediaClip(
-            id=self.id,
-            timeline_start=self.timeline_start,
-            duration=self.duration,
-            speed=self.speed,
+            **carried,
             # A still image has no timeline of its own, so the trim offset must not
             # be carried over; for video it is the offset into the *rendered* file.
             source=Source(source=self.media_source, start=Time.zero() if is_image else self.source.start),
             fps=self.fps,
             resolution=(width, height),
-            transform=self.transform.model_copy(deep=True),
             source_audio=self.source_audio.model_copy(deep=True),
         )
 

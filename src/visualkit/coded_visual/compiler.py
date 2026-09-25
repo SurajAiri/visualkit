@@ -67,6 +67,7 @@ def _is_local_reference(url: str) -> bool:
         return False  # protocol-relative or scheme:// (http, https, data, mailto, ...)
     return True
 
+
 # Files inside a bundle that affect rendering; hashed into the cache key.
 _BUNDLE_HASH_LIMIT_BYTES = 64 * 1024 * 1024
 

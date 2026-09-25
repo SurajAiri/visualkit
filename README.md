@@ -7,7 +7,9 @@ composed on a `Timeline` and exported to a standalone video or to a project
 file for import into DaVinci Resolve.
 
 > **Status:** phase 1. Core timeline/clip model, coded-visual compilation,
-> and export are implemented. Keyframes, transitions, masking/chroma-key,
+> and export are implemented. Keyframed transforms (position, scale, rotation,
+> zoom, opacity) are supported by the FFmpeg exporter and single-clip previews;
+> the DaVinci Resolve export ignores keyframes. Transitions, masking/chroma-key,
 > and other advanced editing features are on the roadmap (see `notes/`) but
 > not yet built.
 

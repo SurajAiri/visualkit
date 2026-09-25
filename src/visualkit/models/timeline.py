@@ -15,6 +15,7 @@ from visualkit.models.clips import (
     CompileStatus,
     CompoundAudioClip,
     CompoundClip,
+    VisualClip,
     VisualContent,
 )
 from visualkit.utils.base_model import VisualKitModel
@@ -309,7 +310,16 @@ class Track(VisualKitModel, Generic[TClip]):
         second = clip.model_copy(deep=True)
         second.id = f"clip_{uuid.uuid4().hex[:8]}"
         second.timeline_start = at_time
-        second.duration = Time(end.value - at_time.value)
+        second_duration = Time(end.value - at_time.value)
+        # Keyframes are clip-local, so each half keeps only its own part of every curve,
+        # rebased to its own start (speed plays no part: see VisualClip.keyframes).
+        first_keys: dict[str, Any] | None = None
+        if isinstance(clip, VisualClip) and clip.keyframes:
+            first_keys = {name: curve.head(delta.value) for name, curve in clip.keyframes.items()}
+            second_keys = {name: curve.tail(delta.value) for name, curve in clip.keyframes.items()}
+            second.set_duration_and_keyframes(second_duration, second_keys)
+        else:
+            second.duration = second_duration
         if hasattr(second, "source"):
             second.source.start = Time(second.source.start.value + delta.value * _speed_fraction(clip.speed))
 
@@ -326,7 +336,10 @@ class Track(VisualKitModel, Generic[TClip]):
                 raise TimelineValidationError("; ".join(errors))
 
         # ---- commit (nothing below can raise) ----
-        clip.duration = first_duration
+        if isinstance(clip, VisualClip):
+            clip.set_duration_and_keyframes(first_duration, first_keys)
+        else:
+            clip.duration = first_duration
         if stale_render:
             clip.media_source = None
             clip.compile_status = CompileStatus.PENDING
@@ -399,7 +412,16 @@ class Track(VisualKitModel, Generic[TClip]):
                 )
 
         clip.timeline_start = new_in
-        clip.duration = Time(new_duration_value)
+        if isinstance(clip, VisualClip):
+            # `delta` is signed: a head trim moves keyframes earlier, revealing pre-roll moves them later.
+            rebased = (
+                {name: curve.tail(delta) for name, curve in clip.keyframes.items()}
+                if clip.keyframes
+                else None
+            )
+            clip.set_duration_and_keyframes(Time(new_duration_value), rebased)
+        else:
+            clip.duration = Time(new_duration_value)
         if new_source_start is not None:
             clip.source.start = new_source_start
 
@@ -442,7 +464,16 @@ class Track(VisualKitModel, Generic[TClip]):
                     f"Cannot trim_out clip '{clip_id}' to {new_out}: " + "; ".join(conflicts)
                 )
 
-        clip.duration = Time(new_duration_value)
+        if isinstance(clip, VisualClip):
+            new_duration = Time(new_duration_value)
+            clipped = (
+                {name: curve.head(new_duration.value) for name, curve in clip.keyframes.items()}
+                if clip.keyframes and new_duration < clip.duration
+                else None
+            )
+            clip.set_duration_and_keyframes(new_duration, clipped)
+        else:
+            clip.duration = Time(new_duration_value)
 
         if isinstance(clip, CodedVisualClip) and clip.compile_status == CompileStatus.READY:
             clip.media_source = None

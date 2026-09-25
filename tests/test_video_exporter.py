@@ -314,8 +314,12 @@ class TestTransformFilterChain:
         from visualkit.models import Transform
 
         chain, w, h = _transform_filters(Transform(rotation=90), 640, 360)
-        assert "ow=360:oh=640" in chain
+        # An exact quarter turn is a lossless `transpose` (17x faster than `rotate`;
+        # handoff §2.4) and needs no explicit box; any other angle sizes `rotate`.
+        assert "transpose=1" in chain
         assert (w, h) == (360, 640)
+        chain, w, h = _transform_filters(Transform(rotation=30), 640, 360)
+        assert "rotate=" in chain and f"ow={w}:oh={h}" in chain
 
     def test_rotation_45_reports_enlarged_effective_size(self):
         from visualkit.exporters.video import _transform_filters

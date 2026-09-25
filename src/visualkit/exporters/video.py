@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import html
 import logging
@@ -8,11 +9,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from visualkit.exporters._ffmpeg import filter_script_option, filtergraph_script
+from visualkit.exporters._render_plan import build_clip_stage, build_static_stage
 from visualkit.exporters.base import BaseExporter
 from visualkit.models.clips.audio import AudioClip
 from visualkit.models.clips.media import MediaClip
 from visualkit.models.clips.text import TEXT_REFERENCE_HEIGHT, TextClip
-from visualkit.models.clips.visual import Transform
+from visualkit.models.clips.visual import Transform, VisualClip
 from visualkit.models.timeline import Timeline
 from visualkit.utils.exceptions import BrowserNotFoundError, ExportError, MissingSourceError, VisualKitError
 
@@ -89,79 +92,20 @@ def _atempo_chain(speed: float) -> str:
 
 
 def _transform_filters(transform: Transform, width: int, height: int) -> tuple[str, int, int]:
-    """Build the ffmpeg video-filter chain implementing `transform` for a
-    clip being composited onto a `width`x`height` canvas.
+    """Build the ffmpeg video-filter chain implementing a *static* `transform` for a clip being
+    composited onto a `width`x`height` canvas.
 
-    Returns (filter_chain_without_labels, effective_w, effective_h) --
-    the effective size is needed by the caller to compute the overlay
-    x/y position, since `overlay`'s own x/y refer to the *scaled* frame,
-    not the original source resolution.
+    Returns (filter_chain_without_labels, effective_w, effective_h) -- the effective size is what
+    the caller needs to compute the overlay x/y, since `overlay`'s own x/y refer to the *scaled*
+    frame, not the original source resolution.
 
-    Order matches Transform's own documented contract: fit -> zoom (crop
-    then scale back to fill) -> scale (uniform multiplier) -> rotate ->
-    opacity. Position is applied by the caller via `overlay=x:y`, since
-    that's a compositing position rather than a property of the frame
-    itself.
+    Thin wrapper kept for callers that only have a `Transform`; the real logic (including
+    keyframes) lives in `visualkit.exporters._render_plan`, shared with the single-clip preview.
+    Order: fit -> zoom -> scale -> rotate -> opacity; position is applied by the caller via `overlay`.
     """
-    # 1. Fit to explicit Size, or to the canvas if Size is (0, 0).
-    if transform.size.width > 0 and transform.size.height > 0:
-        target_w, target_h = int(transform.size.width), int(transform.size.height)
-    else:
-        target_w, target_h = width, height
-
-    filters = [
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
-        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black@0",
-    ]
-
-    # 2. Zoom: crop into the center by 1/zoom, then scale back up to fill
-    # the same target_w x target_h footprint. zoom=1.0 is a no-op (no
-    # crop, no rescale) since it's the identity value.
-    if transform.zoom != 1.0 and transform.zoom > 0:
-        crop_w = max(1, round(target_w / transform.zoom))
-        crop_h = max(1, round(target_h / transform.zoom))
-        filters.append(f"crop={crop_w}:{crop_h}:(iw-{crop_w})/2:(ih-{crop_h})/2")
-        filters.append(f"scale={target_w}:{target_h}")
-
-    # 3. Scale: uniform multiplier on the whole frame's own footprint
-    # (distinct from zoom -- this changes the frame's size, not what's
-    # visible within it).
-    effective_w, effective_h = target_w, target_h
-    if transform.scale != 1.0:
-        effective_w = max(1, round(target_w * transform.scale))
-        effective_h = max(1, round(target_h * transform.scale))
-        filters.append(f"scale={effective_w}:{effective_h}")
-
-    # 4. Rotation, in degrees -> radians for ffmpeg's `rotate` filter.
-    # `rotate` needs an alpha channel to show transparency in the
-    # corners it exposes, so format is forced to rgba beforehand whenever
-    # rotation or opacity requires alpha compositing.
-    needs_alpha = transform.rotation != 0.0 or transform.opacity != 100
-    if needs_alpha:
-        filters.append("format=rgba")
-    if transform.rotation != 0.0:
-        import math
-
-        radians = math.radians(transform.rotation)
-        # `rotate` keeps the INPUT size unless told otherwise, which crops the
-        # rotated layer back to its pre-rotation box (a 90-degree turn of a wide
-        # frame lost 44% of its pixels). Give it the rotated bounding box, and
-        # report that as the effective size so the caller centres the overlay on it.
-        cos_a, sin_a = abs(math.cos(radians)), abs(math.sin(radians))
-        rot_w = math.ceil(effective_w * cos_a + effective_h * sin_a - 1e-6)
-        rot_h = math.ceil(effective_w * sin_a + effective_h * cos_a - 1e-6)
-        rot_w += rot_w % 2  # even dimensions keep centring exact for yuv formats
-        rot_h += rot_h % 2
-        filters.append(f"rotate={radians}:ow={rot_w}:oh={rot_h}:c=black@0")
-        effective_w, effective_h = rot_w, rot_h
-
-    # 5. Opacity last, via colorchannelmixer scaling the alpha channel by
-    # the 0-100 percent (as a 0.0-1.0 fraction).
-    if transform.opacity != 100:
-        alpha_mult = transform.opacity / 100.0
-        filters.append(f"colorchannelmixer=aa={alpha_mult}")
-
-    return ",".join(filters), effective_w, effective_h
+    stage = build_static_stage(transform, width, height)
+    assert stage.chain is not None and stage.effective_size is not None  # static stages are single chains
+    return stage.chain, stage.effective_size[0], stage.effective_size[1]
 
 
 class FFmpegVideoExporter(BaseExporter):
@@ -291,14 +235,13 @@ class FFmpegVideoExporter(BaseExporter):
             # exporter.
             source_span_s = clip.duration.seconds * speed
 
-            transform = getattr(clip, "transform", Transform())
-            transform_chain, eff_w, eff_h = _transform_filters(transform, width, height)
-
-            # overlay's x/y are the top-left corner of the (already
-            # scaled) overlay frame on the base canvas; Transform.position
-            # is a center-relative pixel offset, so it's converted here.
-            overlay_x = (width - eff_w) / 2 + transform.position.x
-            overlay_y = (height - eff_h) / 2 + transform.position.y
+            # One shared builder (also used by the single-clip preview) turns the clip's transform and
+            # keyframes into filters plus overlay options. Keyframe curves are shifted by `start_s`
+            # because ffmpeg's `t` is absolute timeline time (each clip is placed with setpts+start).
+            if isinstance(clip, VisualClip):
+                stage = build_clip_stage(clip, width, height, clip_start_s=start_s)
+            else:
+                stage = build_static_stage(Transform(), width, height)
 
             label_scaled = f"v_scaled_{this_input}"
             label_next = f"v_comp_{this_input}"
@@ -309,16 +252,13 @@ class FFmpegVideoExporter(BaseExporter):
             # run twice as fast, which is PTS/2 not PTS*2. Previously
             # there was no speed-aware term here at all, so `speed` had no
             # effect on playback rate.
-            filter_complex.append(
-                f"[{this_input}:v]trim=duration={source_span_s},"
-                f"setpts=(PTS-STARTPTS)/{speed}+{start_s}/TB,"
-                f"{transform_chain}[{label_scaled}]"
-            )
+            prefix = f"trim=duration={source_span_s},setpts=(PTS-STARTPTS)/{speed}+{start_s}/TB,"
+            filter_complex.extend(stage.statements(f"{this_input}:v", label_scaled, str(this_input), prefix))
 
             # Overlay onto composite
             filter_complex.append(
                 f"{current_video_label}[{label_scaled}]overlay="
-                f"x={overlay_x}:y={overlay_y}:enable='between(t,{start_s},{end_s})'[{label_next}]"
+                f"{stage.overlay_options}:enable='between(t,{start_s},{end_s})'[{label_next}]"
             )
             current_video_label = f"[{label_next}]"
 
@@ -396,8 +336,14 @@ class FFmpegVideoExporter(BaseExporter):
                 final_audio_label = "[a_out]"
 
         # Assemble final command
-        if filter_complex:
-            cmd.extend(["-filter_complex", ";".join(filter_complex)])
+        # The filtergraph goes through a script file rather than the command line: keyframed clips
+        # emit expressions that grow with the keyframe count and would overflow the OS argument
+        # limit. The file is written just before ffmpeg runs and always removed afterwards.
+        graph = ";".join(filter_complex)
+        graph_arg_index: int | None = None
+        if graph:
+            graph_arg_index = len(cmd) + 1
+            cmd.extend([filter_script_option(cmd[0]), ""])
 
         if current_video_label == "[0:v]":
             cmd.extend(["-map", "0:v"])
@@ -427,13 +373,19 @@ class FFmpegVideoExporter(BaseExporter):
         tmp_path = out_path.with_name(f".{out_path.stem}.part{out_path.suffix}")
         cmd[-1] = str(tmp_path)
 
-        try:
-            result = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        except FileNotFoundError as err:
-            raise ExportError(
-                f"Cannot export: the '{cmd[0]}' executable was not found. "
-                "Install FFmpeg and make sure it is on PATH."
-            ) from err
+        with contextlib.ExitStack() as stack:
+            if graph_arg_index is not None:
+                script = stack.enter_context(
+                    filtergraph_script(graph, directory=out_path.parent, stem=out_path.stem)
+                )
+                cmd[graph_arg_index] = str(script)
+            try:
+                result = subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            except FileNotFoundError as err:
+                raise ExportError(
+                    f"Cannot export: the '{cmd[0]}' executable was not found. "
+                    "Install FFmpeg and make sure it is on PATH."
+                ) from err
 
         if result.returncode != 0:
             stderr_text = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""

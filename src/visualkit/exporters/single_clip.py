@@ -85,7 +85,8 @@ def preview_media_image(
     Raises `MissingSourceError` if the source file can't be found and
     `ExportError` if ffmpeg itself fails.
     """
-    from visualkit.exporters.video import FFmpegVideoExporter, _transform_filters
+    from visualkit.exporters._render_plan import build_clip_stage
+    from visualkit.exporters.video import FFmpegVideoExporter
 
     width, height = resolution or clip.resolution
 
@@ -104,12 +105,10 @@ def preview_media_image(
     # (matches how CodedVisualClip.to_media_clip() treats a still source).
     source_offset_s = 0.0 if is_image else clip.source.start.seconds + max(0.0, time) * clip.speed
 
-    transform_chain, eff_w, eff_h = _transform_filters(clip.transform, width, height)
-    # Same conversion FFmpegVideoExporter.export() uses: overlay's x/y are
-    # the top-left corner of the (already scaled) frame, while
-    # Transform.position is a center-relative offset.
-    overlay_x = (width - eff_w) / 2 + clip.transform.position.x
-    overlay_y = (height - eff_h) / 2 + clip.transform.position.y
+    # The same builder `FFmpegVideoExporter.export` uses, so a preview can't drift from the export.
+    # Keyframes are clip-local seconds and ffmpeg's `t` is 0 for this single frame, so shifting the
+    # curves by `-time` makes the frame show the animation exactly `time` seconds into the clip.
+    stage = build_clip_stage(clip, width, height, clip_start_s=-max(0.0, time))
 
     digest = hashlib.sha256(
         "\0".join(
@@ -118,6 +117,12 @@ def preview_media_image(
                 f"{source_offset_s:.3f}",
                 f"{width}x{height}",
                 clip.transform.model_dump_json(),
+                # Only keyframed clips add to the key, so existing cache entries stay valid.
+                *(
+                    [f"{max(0.0, time):.6f}", clip.model_dump_json(include={"keyframes"})]
+                    if clip.keyframes
+                    else []
+                ),
             ]
         ).encode()
     ).hexdigest()[:24]
@@ -131,7 +136,9 @@ def preview_media_image(
             "Install FFmpeg and make sure it is on PATH."
         )
 
-    filter_complex = f"[1:v]{transform_chain}[fg];[0:v][fg]overlay=x={overlay_x}:y={overlay_y}[out]"
+    statements = stage.statements("1:v", "fg", "p")
+    statements.append(f"[0:v][fg]overlay={stage.overlay_options}[out]")
+    filter_complex = ";".join(statements)
     cmd = [
         ffmpeg,
         "-y",

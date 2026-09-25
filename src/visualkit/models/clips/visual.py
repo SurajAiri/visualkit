@@ -1,14 +1,15 @@
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 
+from visualkit.models.keyframes import PropertyCurve, validate_curves
 from visualkit.utils.base_model import VisualKitModel
+from visualkit.utils.time import Time
 
 from .base import BaseClip, Position, Size
 
 
-# todo: add keyframes on all these
 class Transform(VisualKitModel):
     """Visual placement/appearance applied when compositing a clip onto the
     target canvas. Exporters apply these fields in a fixed order:
@@ -25,6 +26,12 @@ class Transform(VisualKitModel):
     5. Offset by `position` (pixels on the target canvas, from center).
     6. Apply `opacity` (0-100 percent) last, when compositing over
        whatever is beneath it.
+
+    These are the *static* values. To animate any of them, put a
+    `PropertyCurve` in the owning clip's `VisualClip.keyframes`; a keyed
+    property ignores its static value here. `is_identity` looks only at the
+    static values on purpose: DaVinci Resolve export reads `Transform` alone
+    (it ignores keyframes) and must not treat an untouched transform as modified.
     """
 
     position: Position = Field(
@@ -118,3 +125,88 @@ class VisualClip(BaseClip):
     transform: Transform = Field(
         default_factory=Transform, description="Transform properties of the visual clip"
     )
+    keyframes: dict[str, PropertyCurve] = Field(
+        default_factory=dict,
+        description=(
+            "Animation curves keyed by property name: 'position.x', 'position.y', 'scale', "
+            "'rotation', 'zoom', 'opacity'. A keyed property ignores its static value in "
+            "`transform`. Keyframe times are clip-local timeline time (seconds after "
+            "`timeline_start`) and are NOT affected by `speed`. Rendered by the FFmpeg video "
+            "exporter only; DaVinci Resolve export ignores keyframes."
+        ),
+    )
+
+    @field_validator("keyframes")
+    @classmethod
+    def _check_keyframe_names_and_bounds(cls, curves: dict[str, PropertyCurve]) -> dict[str, PropertyCurve]:
+        validate_curves(curves)
+        return curves
+
+    @model_validator(mode="after")
+    def _check_keyframe_times_fit_the_clip(self) -> "VisualClip":
+        validate_curves(self.keyframes, self.duration)
+        return self
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Assignment that leaves the clip unchanged when validation rejects it.
+
+        Pydantic runs model-level validators (like the keyframe-vs-duration check above)
+        *after* it has stored the new value and does not undo that if the validator raises,
+        so a rejected ``clip.duration = ...`` would otherwise leave the clip half-mutated.
+        """
+        if name not in type(self).model_fields:
+            super().__setattr__(name, value)
+            return
+        missing = object()
+        previous = self.__dict__.get(name, missing)
+        previous_set = set(self.__pydantic_fields_set__)
+        try:
+            super().__setattr__(name, value)
+        except Exception:
+            if previous is missing:
+                self.__dict__.pop(name, None)
+            else:
+                self.__dict__[name] = previous
+            object.__setattr__(self, "__pydantic_fields_set__", previous_set)
+            raise
+
+    @property
+    def is_animated(self) -> bool:
+        """True if any property is keyframed (unlike `Transform.is_identity`, this sees keyframes)."""
+        return bool(self.keyframes)
+
+    def transform_at(self, time: "Time | float") -> Transform:
+        """A static `Transform` with every keyed property resolved at clip-local `time` (seconds).
+
+        `opacity` is rounded to the nearest whole percent because `Transform.opacity` is an int.
+        """
+        seconds = time
+        data = self.transform.model_dump()
+        for name, curve in self.keyframes.items():
+            value = curve.value_at(seconds)
+            if name == "position.x":
+                data["position"]["x"] = value
+            elif name == "position.y":
+                data["position"]["y"] = value
+            elif name == "opacity":
+                data["opacity"] = round(value)
+            else:
+                data[name] = value
+        return Transform.model_validate(data)
+
+    def set_duration_and_keyframes(
+        self, duration: Time, keyframes: dict[str, PropertyCurve] | None = None
+    ) -> None:
+        """Change `duration` and `keyframes` together without ever tripping the clip's own validation.
+
+        Keyframe times must not exceed `duration`, and both fields validate on assignment, so
+        the order matters: when the clip shrinks, the (already shortened) keyframes go first;
+        when it grows, the duration goes first. Use this from any code that retimes a clip.
+        """
+        new_keys = self.keyframes if keyframes is None else keyframes
+        if duration <= self.duration:
+            self.keyframes = new_keys
+            self.duration = duration
+        else:
+            self.duration = duration
+            self.keyframes = new_keys

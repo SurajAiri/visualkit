@@ -19,7 +19,7 @@ from visualkit.models.clips.coded_visual import CodedVisualClip, CompileStatus
 from visualkit.models.clips.compound import CompoundAudioClip, CompoundClip
 from visualkit.models.clips.media import MediaClip
 from visualkit.models.clips.text import TextClip
-from visualkit.models.clips.visual import Transform
+from visualkit.models.clips.visual import Transform, VisualClip
 from visualkit.models.timeline import Timeline
 from visualkit.utils.exceptions import TimelineValidationError
 from visualkit.utils.time import Time
@@ -290,6 +290,18 @@ class TimelinePipeline:
                 if not self._place_child(expanded, compound_offset, effective_speed, clip_end):
                     continue
                 if not comp_transform.is_identity and hasattr(expanded, "transform"):
+                    if isinstance(expanded, VisualClip) and expanded.keyframes:
+                        # Composing an animated child with a parent transform would mean composing
+                        # two curves per property; keyed values also ignore the static transform the
+                        # parent's offset/scale/rotation would be folded into. Refuse rather than
+                        # render the animation silently wrong.
+                        raise NotImplementedError(
+                            f"Clip '{expanded.id}' has keyframes and sits inside CompoundClip "
+                            f"'{compound.id}', whose transform is not the identity. Animated clips "
+                            "inside a transformed compound are not supported yet: leave the compound's "
+                            "transform at its defaults (animate the inner clips instead), or move the "
+                            "animated clip out of the compound."
+                        )
                     expanded.transform = compose_transforms(comp_transform, expanded.transform)
                 target_timeline.video_tracks[dest_v_idx].add_clip(expanded)
 
@@ -325,7 +337,21 @@ class TimelinePipeline:
         if end > clip_end:
             duration = Time(clip_end.value - start.value)
         clip.timeline_start = start
-        clip.duration = duration
+        if isinstance(clip, VisualClip):
+            # Keyframe times live on the inner timeline, which the compound plays at
+            # `effective_speed` -- so they scale with the clip's duration (the clip's own `speed`
+            # is not involved), and anything now past the trimmed end is cut.
+            retimed = (
+                {
+                    name: curve.time_scaled(1 / speed).head(duration.value)
+                    for name, curve in clip.keyframes.items()
+                }
+                if clip.keyframes
+                else None
+            )
+            clip.set_duration_and_keyframes(duration, retimed)
+        else:
+            clip.duration = duration
         clip.speed = float(_frac(clip.speed) * speed)
         return True
 

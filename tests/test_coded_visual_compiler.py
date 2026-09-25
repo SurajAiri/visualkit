@@ -438,9 +438,7 @@ class TestValidateBundle:
         assert clip.validate_bundle() == []
 
     def test_unresolved_placeholder_reference_is_skipped_not_flagged(self, tmp_path: Path):
-        bundle = self._bundle(
-            tmp_path, '<div class="visualkit-canvas"><img src="{{ dynamic_icon }}"></div>'
-        )
+        bundle = self._bundle(tmp_path, '<div class="visualkit-canvas"><img src="{{ dynamic_icon }}"></div>')
         clip = CodedVisualClip(source=str(bundle), duration=Time.from_seconds(2))
         assert clip.validate_bundle() == []
 
