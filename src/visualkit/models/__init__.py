@@ -1,3 +1,4 @@
+from visualkit.models.animation import AnimationPreset, ClipAnimation
 from visualkit.models.clips import (
     AudioClip,
     AudioContent,
@@ -16,10 +17,19 @@ from visualkit.models.clips import (
     Size,
     Source,
     TextClip,
+    TextGradient,
     TextStyle,
     Transform,
     VisualClip,
     VisualContent,
+)
+from visualkit.models.effects import MASK_PROPERTIES, ChromaKey, Mask, color_to_rgb
+from visualkit.models.keyframes import (
+    KEYFRAMEABLE_PROPERTIES,
+    CurveSpec,
+    Easing,
+    Keyframe,
+    PropertyCurve,
 )
 from visualkit.models.timeline import (
     AddClipResult,
@@ -52,6 +62,7 @@ __all__ = [
     "MediaClip",
     "TextClip",
     "TextStyle",
+    "TextGradient",
     "CodedVisualClip",
     "CompileStatus",
     "RenderMode",
@@ -73,4 +84,15 @@ __all__ = [
     "Variable",
     "VariableType",
     "ExposedParameter",
+    "AnimationPreset",
+    "ClipAnimation",
+    "ChromaKey",
+    "Mask",
+    "MASK_PROPERTIES",
+    "color_to_rgb",
+    "Easing",
+    "Keyframe",
+    "PropertyCurve",
+    "CurveSpec",
+    "KEYFRAMEABLE_PROPERTIES",
 ]

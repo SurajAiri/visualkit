@@ -390,6 +390,12 @@ KEYFRAMEABLE_PROPERTIES: dict[str, CurveSpec] = {
     "rotation": CurveSpec(minimum=-3600.0, maximum=3600.0),
     "zoom": CurveSpec(minimum=0.0, maximum=100.0, exclusive_minimum=True),
     "opacity": CurveSpec(minimum=0.0, maximum=100.0),
+    # Mask geometry (normalised to the clip frame); needs `VisualClip.mask` to be set.
+    "mask.x": CurveSpec(minimum=0.0, maximum=1.0),
+    "mask.y": CurveSpec(minimum=0.0, maximum=1.0),
+    "mask.width": CurveSpec(minimum=0.0, maximum=1.0),
+    "mask.height": CurveSpec(minimum=0.0, maximum=1.0),
+    "mask.feather": CurveSpec(minimum=0.0, maximum=1.0),
 }
 
 

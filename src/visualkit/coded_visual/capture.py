@@ -77,6 +77,27 @@ def frame_times(duration: float, fps: float) -> list[float]:
     return [i / fps for i in range(count)]
 
 
+def encoder_args(alpha: bool, width: int = 0, height: int = 0) -> list[str]:
+    """Output codec arguments (everything between the input and the output path)."""
+    if alpha:
+        # Lossless and keeps partial alpha. 4:2:0 subsamples chroma over 2x2 blocks, so an odd
+        # last row/column would share a block with a padding pixel and come back with a wrong
+        # colour; odd sizes therefore use 4:4:4 (exact, and no padding to change the size).
+        odd = bool(width % 2 or height % 2)
+        return ["-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuva444p" if odd else "yuva420p"]
+    return [
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        # yuv420p needs even dimensions.
+        "-vf",
+        "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+    ]
+
+
 def capture_video(
     *,
     html_path: Path,
@@ -87,8 +108,16 @@ def capture_video(
     fps: float,
     ffmpeg: str = "ffmpeg",
     timeout: float = 300.0,
+    alpha: bool = True,
 ) -> None:
-    """Render ``html_path`` for ``duration`` seconds at ``fps`` into ``out_file`` (H.264 MP4).
+    """Render ``html_path`` for ``duration`` seconds at ``fps`` into ``out_file``.
+
+    With ``alpha=True`` (the default) the video is lossless FFV1 in Matroska
+    (``yuva420p``, or ``yuva444p`` for odd sizes), so a transparent page background stays transparent and
+    chroma-key/mask edges are not smeared by compression. ``alpha=False`` writes
+    the previous flat H.264 MP4 (transparency flattened to black), which is what
+    the DaVinci Resolve export keeps using. ``out_file``'s suffix should match
+    (``.mkv`` / ``.mp4``).
 
     Frames are streamed straight into ffmpeg's stdin as PNGs; nothing is written
     to disk per frame. Raises `CodedVisualCompileError` (with ffmpeg's stderr) on failure.
@@ -97,7 +126,7 @@ def capture_video(
     out_file.parent.mkdir(parents=True, exist_ok=True)
     if out_file.exists():
         out_file.unlink()
-    tmp_out = out_file.with_suffix(".part.mp4")
+    tmp_out = out_file.with_suffix(f".part{out_file.suffix}")
 
     times = frame_times(duration, fps)
     cmd = [
@@ -114,15 +143,7 @@ def capture_video(
         "png",
         "-i",
         "-",
-        "-c:v",
-        "libx264",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        # yuv420p needs even dimensions.
-        "-vf",
-        "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+        *encoder_args(alpha, width, height),
         str(tmp_out),
     ]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)

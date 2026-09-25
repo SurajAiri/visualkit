@@ -7,7 +7,7 @@ from .base import BaseClip, Position, Size, Source
 from .coded_visual import CodedVisualClip, CompileStatus, LintIssue, RenderMode
 from .compound import CompoundAudioClip, CompoundClip, ExposedParameter
 from .media import MediaClip
-from .text import TextClip, TextStyle
+from .text import TextClip, TextGradient, TextStyle
 from .visual import Transform, VisualClip
 
 VisualContent = Annotated[
@@ -35,6 +35,7 @@ __all__ = [
     "Source",
     "TextClip",
     "TextStyle",
+    "TextGradient",
     "Transform",
     "VisualClip",
     "CompoundClip",

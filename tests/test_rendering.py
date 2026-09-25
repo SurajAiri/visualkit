@@ -338,8 +338,10 @@ class TestAnimatedRendering:
                 "error",
                 "-select_streams",
                 "v:0",
+                # Matroska stores no frame count in its header, so count the decoded frames.
+                "-count_frames",
                 "-show_entries",
-                "stream=width,height,nb_frames",
+                "stream=width,height,nb_read_frames",
                 "-of",
                 "csv=p=0",
                 mp4,
@@ -384,7 +386,7 @@ class TestAnimatedRendering:
         compiler.ffmpeg = str(fake)
         with pytest.raises(CodedVisualCompileError, match="boom"):
             compiler.compile(clip)
-        assert not list(compiler.cache_dir.rglob("*.mp4")), (
+        assert not list(compiler.cache_dir.rglob("*.mp4")) + list(compiler.cache_dir.rglob("*.mkv")), (
             "a broken render must not be left where a cache hit could find it"
         )
         assert clip.compile_status == vk.CompileStatus.FAILED
@@ -422,7 +424,8 @@ class TestAutoRenderDefaults:
 
     def test_flatten_default(self, tmp_path):
         animated, still = self._clips(tmp_path)
-        for clip, expected in ((animated, "render.mp4"), (still, "render.png")):
+        # Animated visuals keep their transparency: lossless FFV1 in Matroska.
+        for clip, expected in ((animated, "render.mkv"), (still, "render.png")):
             t = vk.Timeline()
             t.add_clip(clip)
             assert self._media_name(t.flatten()) == expected

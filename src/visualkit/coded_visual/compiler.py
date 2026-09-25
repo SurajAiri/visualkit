@@ -95,6 +95,12 @@ def _stringify(value: Any) -> str:
     return str(value)
 
 
+#: Bumped whenever the encoded *format* of a rendered video changes (codec, pixel format,
+#: container). The cache key otherwise hashes only the inputs, so without this a stale render in
+#: an old format could be served after an upgrade.
+VIDEO_FORMAT_VERSION = "2-ffv1-yuva420p"
+
+
 class CodedVisualCompiler:
     """Renders `CodedVisualClip`s to PNG (still) or video (animated) media."""
 
@@ -132,7 +138,7 @@ class CodedVisualCompiler:
         hasher.update(
             f"{canvas_size.width:g}x{canvas_size.height:g}|{aspect_ratio}|{fps:g}|{duration:g}".encode()
         )
-        hasher.update(f"|{render_mode}|{bundle_digest}".encode())
+        hasher.update(f"|{render_mode}|{bundle_digest}|{VIDEO_FORMAT_VERSION}".encode())
         return hasher.hexdigest()
 
     @staticmethod
@@ -521,14 +527,19 @@ class CodedVisualCompiler:
         output_path: str | Path | None = None,
         fps: float | None = None,
         force: bool = False,
+        alpha: bool = True,
     ) -> Path:
-        """Render `clip`'s animation to a video file (see `visualkit.coded_visual.capture`)."""
+        """Render `clip`'s animation to a video file (see `visualkit.coded_visual.capture`).
+
+        ``alpha=True`` (default) writes ``render.mkv`` (lossless FFV1 with transparency);
+        ``alpha=False`` writes the flat H.264 ``render.mp4``.
+        """
         from visualkit.coded_visual.capture import capture_video
 
         info = self._resolve_inputs(clip)
         target_html, cache_key = self._write_bundle(clip, info)
         bundle_dir = target_html.parent
-        cached = bundle_dir / "render.mp4"
+        cached = bundle_dir / ("render.mkv" if alpha else "render.mp4")
 
         if force or not cached.exists():
             if shutil.which(self.ffmpeg) is None:
@@ -542,6 +553,7 @@ class CodedVisualCompiler:
                 fps=fps or info["fps"],
                 ffmpeg=self.ffmpeg,
                 timeout=self.render_timeout,
+                alpha=alpha,
             )
 
         out = cached
@@ -607,6 +619,7 @@ class CodedVisualCompiler:
         clip: CodedVisualClip,
         force: bool = False,
         render_video: bool | None = None,
+        alpha: bool = True,
     ) -> str:
         """Render `clip` to media and return the media path.
 
@@ -622,7 +635,7 @@ class CodedVisualCompiler:
             else:
                 animated = render_video
             path = (
-                self.render_to_video(clip, force=force)
+                self.render_to_video(clip, force=force, alpha=alpha)
                 if animated
                 else self.render_to_image(clip, force=force)
             )

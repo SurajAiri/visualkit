@@ -18,6 +18,7 @@ from visualkit.models.clips import (
     VisualClip,
     VisualContent,
 )
+from visualkit.models.clips.visual import _trimmed_animation
 from visualkit.utils.base_model import VisualKitModel
 from visualkit.utils.exceptions import (
     ClipNotFoundError,
@@ -320,6 +321,8 @@ class Track(VisualKitModel, Generic[TClip]):
             second.set_duration_and_keyframes(second_duration, second_keys)
         else:
             second.duration = second_duration
+        if isinstance(second, VisualClip):
+            second.animation = _trimmed_animation(second.animation, keep_in=False, keep_out=True)
         if hasattr(second, "source"):
             second.source.start = Time(second.source.start.value + delta.value * _speed_fraction(clip.speed))
 
@@ -338,6 +341,7 @@ class Track(VisualKitModel, Generic[TClip]):
         # ---- commit (nothing below can raise) ----
         if isinstance(clip, VisualClip):
             clip.set_duration_and_keyframes(first_duration, first_keys)
+            clip.animation = _trimmed_animation(clip.animation, keep_in=True, keep_out=False)
         else:
             clip.duration = first_duration
         if stale_render:
@@ -1060,7 +1064,12 @@ class Timeline(VisualKitModel):
                     latest = clip_end
         return latest
 
-    def flatten(self, force_compile: bool = False, render_video: bool | None = None) -> Timeline:
+    def flatten(
+        self,
+        force_compile: bool = False,
+        render_video: bool | None = None,
+        alpha: bool = True,
+    ) -> Timeline:
         """Resolve variables, compile coded visuals, and flatten all compound clips
         into a concrete Timeline that contains only media, text and audio clips.
 
@@ -1072,6 +1081,9 @@ class Timeline(VisualKitModel):
                 clip: a visual with motion becomes a video, a static one a PNG. ``True``
                 forces video and ``False`` forces a still image, overriding each clip's
                 own ``render_mode``.
+            alpha: Animated coded visuals are rendered as lossless FFV1 ``.mkv`` so
+                transparent backgrounds stay transparent (default). ``False`` renders the
+                flat H.264 ``.mp4`` used by the DaVinci Resolve export.
         """
         from visualkit.engine.pipeline import TimelinePipeline
 
@@ -1079,6 +1091,7 @@ class Timeline(VisualKitModel):
             self,
             force_compile=force_compile,
             render_video=render_video,
+            alpha=alpha,
         )
 
     def export_to_resolve(

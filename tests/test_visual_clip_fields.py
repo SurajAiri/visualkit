@@ -12,6 +12,8 @@ from __future__ import annotations
 import pytest
 
 from visualkit.models import CodedVisualClip, CompileStatus, MediaClip, Transform, VisualClip
+from visualkit.models.animation import ClipAnimation
+from visualkit.models.effects import ChromaKey, Mask
 from visualkit.models.keyframes import PropertyCurve
 from visualkit.utils.time import Time
 
@@ -25,6 +27,9 @@ SAMPLES = {
     "speed": 2.0,
     "transform": Transform(scale=0.5, opacity=40, rotation=10),
     "keyframes": {"opacity": PropertyCurve.from_points([(0, 0), (1, 100)])},
+    "chroma_key": ChromaKey(color="#00ff00", similarity=0.3, despill=True),
+    "mask": Mask(shape="ellipse", width=0.4, feather=0.1, invert=True),
+    "animation": ClipAnimation(in_preset="fade", out_preset="slide_up"),
 }
 
 

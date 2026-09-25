@@ -7,11 +7,17 @@ composed on a `Timeline` and exported to a standalone video or to a project
 file for import into DaVinci Resolve.
 
 > **Status:** phase 1. Core timeline/clip model, coded-visual compilation,
-> and export are implemented. Keyframed transforms (position, scale, rotation,
-> zoom, opacity) are supported by the FFmpeg exporter and single-clip previews;
-> the DaVinci Resolve export ignores keyframes. Transitions, masking/chroma-key,
-> and other advanced editing features are on the roadmap (see `notes/`) but
-> not yet built.
+> and export are implemented. The FFmpeg exporter (and single-clip previews)
+> also support: keyframed transforms (position, scale, rotation, zoom,
+> opacity), chroma key, rectangle/ellipse masks (with keyframeable geometry),
+> `fade`/`slide`/`pop`/`wipe` animation presets (`ClipAnimation`, which also
+> covers text -- a `TextClip` is a `VisualClip` like any other), extended
+> text styling (outline, drop shadow, letter spacing, line height, gradient
+> fill), and lossless alpha video (`render.mkv`) for animated coded visuals.
+> The DaVinci Resolve export ignores all of the above (keyframes, chroma key,
+> masks, animation presets, and the extra text styling) and keeps rendering
+> the flat H.264 `render.mp4`. Transitions and per-character text animation
+> are on the roadmap (see `notes/`) but not yet built.
 
 ## Requirements
 

@@ -111,19 +111,24 @@ class TimelinePipeline:
         timeline: Timeline,
         force: bool = False,
         render_video: bool | None = None,
+        alpha: bool = True,
     ) -> Timeline:
         """Compile every CodedVisualClip in `timeline`, including inside compounds (mutates `timeline`).
 
         `render_video`: ``None`` lets each clip's ``render_mode`` decide (a still
         visual becomes a PNG, an animated one a video); ``True``/``False`` force it.
+        `alpha`: animated visuals keep transparency (lossless FFV1 ``.mkv``); ``False`` writes
+        the flat H.264 ``.mp4`` instead.
         """
         for track in timeline.video_tracks:
             for clip in track.clips:
                 if isinstance(clip, CodedVisualClip):
                     if force or clip.compile_status != CompileStatus.READY or not clip.media_source:
-                        self.compiler.compile(clip, force=force, render_video=render_video)
+                        self.compiler.compile(clip, force=force, render_video=render_video, alpha=alpha)
                 elif isinstance(clip, CompoundClip) and clip.inner_timeline:
-                    self.compile_coded_visuals(clip.inner_timeline, force=force, render_video=render_video)
+                    self.compile_coded_visuals(
+                        clip.inner_timeline, force=force, render_video=render_video, alpha=alpha
+                    )
         return timeline
 
     def process(
@@ -131,12 +136,13 @@ class TimelinePipeline:
         timeline: Timeline,
         force_compile: bool = False,
         render_video: bool | None = None,
+        alpha: bool = True,
     ) -> Timeline:
         """Resolve variables -> compile coded visuals -> flatten, **without mutating `timeline`**."""
         self.validate(timeline)
         working = timeline.model_copy(deep=True)
         self.resolve_variables(working)
-        self.compile_coded_visuals(working, force=force_compile, render_video=render_video)
+        self.compile_coded_visuals(working, force=force_compile, render_video=render_video, alpha=alpha)
         return self.flatten(working)
 
     # ------------------------------------------------------------------ flatten
@@ -290,11 +296,12 @@ class TimelinePipeline:
                 if not self._place_child(expanded, compound_offset, effective_speed, clip_end):
                     continue
                 if not comp_transform.is_identity and hasattr(expanded, "transform"):
-                    if isinstance(expanded, VisualClip) and expanded.keyframes:
+                    if isinstance(expanded, VisualClip) and (expanded.keyframes or expanded.animation):
                         # Composing an animated child with a parent transform would mean composing
                         # two curves per property; keyed values also ignore the static transform the
                         # parent's offset/scale/rotation would be folded into. Refuse rather than
-                        # render the animation silently wrong.
+                        # render the animation silently wrong. `animation` (fade/slide/pop/wipe)
+                        # compiles to the same kind of curve, so it shares the same refusal.
                         raise NotImplementedError(
                             f"Clip '{expanded.id}' has keyframes and sits inside CompoundClip "
                             f"'{compound.id}', whose transform is not the identity. Animated clips "

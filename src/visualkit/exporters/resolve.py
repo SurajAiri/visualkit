@@ -92,7 +92,8 @@ class DaVinciResolveExporter(BaseExporter):
         # Ensure timeline is flattened and resolved
         # None = auto: an animated coded visual becomes a video, a static one a PNG.
         render_video = kwargs.get("render_video")
-        flattened = timeline.flatten(render_video=render_video)
+        # Resolve keeps importing the flat H.264 render it always got (alpha=False).
+        flattened = timeline.flatten(render_video=render_video, alpha=False)
 
         if path.suffix.lower() == ".fcpxml":
             xml_content = self.generate_fcpxml(flattened)

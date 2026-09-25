@@ -3,6 +3,8 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from visualkit.models.animation import ClipAnimation, compile_animation
+from visualkit.models.effects import ChromaKey, Mask
 from visualkit.models.keyframes import PropertyCurve, validate_curves
 from visualkit.utils.base_model import VisualKitModel
 from visualkit.utils.time import Time
@@ -119,6 +121,21 @@ class Transform(VisualKitModel):
         return cls(position=Position.from_anchor(anchor, margin, canvas_size=canvas_size), **kwargs)
 
 
+def _trimmed_animation(
+    animation: "ClipAnimation | None", *, keep_in: bool, keep_out: bool
+) -> "ClipAnimation | None":
+    """`animation` with `in_preset`/`out_preset` dropped for the half of a `split_clip` cut
+    that no longer sits at the clip's true start/end (see `visualkit.models.animation`'s module
+    docstring for why `trim_in`/`trim_out` don't need this)."""
+    if animation is None:
+        return None
+    new_in = animation.in_preset if keep_in else None
+    new_out = animation.out_preset if keep_out else None
+    if new_in is None and new_out is None:
+        return None
+    return animation.model_copy(update={"in_preset": new_in, "out_preset": new_out})
+
+
 class VisualClip(BaseClip):
     """Base Class for all visual clips placed on a track"""
 
@@ -132,7 +149,30 @@ class VisualClip(BaseClip):
             "'rotation', 'zoom', 'opacity'. A keyed property ignores its static value in "
             "`transform`. Keyframe times are clip-local timeline time (seconds after "
             "`timeline_start`) and are NOT affected by `speed`. Rendered by the FFmpeg video "
-            "exporter only; DaVinci Resolve export ignores keyframes."
+            "exporter only; DaVinci Resolve export ignores keyframes. The mask geometry can be "
+            "keyed too: 'mask.x', 'mask.y', 'mask.width', 'mask.height', 'mask.feather'."
+        ),
+    )
+    chroma_key: ChromaKey | None = Field(
+        default=None,
+        description=(
+            "Remove a green/blue screen. Applied first, before the clip is fitted or transformed. "
+            "FFmpeg exporter only."
+        ),
+    )
+    mask: Mask | None = Field(
+        default=None,
+        description=(
+            "Show only a rectangle or ellipse of the clip, in the clip's own frame (before its "
+            "transform is applied). FFmpeg exporter only."
+        ),
+    )
+    animation: ClipAnimation | None = Field(
+        default=None,
+        description=(
+            "In/out animation presets (fade, slide, pop, wipe), sugar over `keyframes`/`mask` -- "
+            "see `visualkit.models.animation`. An explicit `keyframes`/`mask` entry for a property "
+            "a preset would drive always wins. FFmpeg exporter only."
         ),
     )
 
@@ -145,6 +185,10 @@ class VisualClip(BaseClip):
     @model_validator(mode="after")
     def _check_keyframe_times_fit_the_clip(self) -> "VisualClip":
         validate_curves(self.keyframes, self.duration)
+        if self.mask is None:
+            orphans = sorted(name for name in self.keyframes if name.startswith("mask."))
+            if orphans:
+                raise ValueError(f"keyframes for {orphans} need a `mask` on the clip to animate")
         return self
 
     def __setattr__(self, name: str, value: Any) -> None:
@@ -172,8 +216,8 @@ class VisualClip(BaseClip):
 
     @property
     def is_animated(self) -> bool:
-        """True if any property is keyframed (unlike `Transform.is_identity`, this sees keyframes)."""
-        return bool(self.keyframes)
+        """True if any property is keyframed or an `animation` preset is set."""
+        return bool(self.keyframes) or self.animation is not None
 
     def transform_at(self, time: "Time | float") -> Transform:
         """A static `Transform` with every keyed property resolved at clip-local `time` (seconds).
@@ -182,8 +226,10 @@ class VisualClip(BaseClip):
         """
         seconds = time
         data = self.transform.model_dump()
-        for name, curve in self.keyframes.items():
+        for name, curve in self.effective_keyframes().items():
             value = curve.value_at(seconds)
+            if name.startswith("mask."):
+                continue  # mask geometry is not part of `Transform`; see `mask_at`
             if name == "position.x":
                 data["position"]["x"] = value
             elif name == "position.y":
@@ -193,6 +239,42 @@ class VisualClip(BaseClip):
             else:
                 data[name] = value
         return Transform.model_validate(data)
+
+    def effective_keyframes(self) -> dict[str, PropertyCurve]:
+        """`keyframes`, plus any curve `animation` compiles in for a property not already keyed.
+
+        This is what `transform_at`/`mask_at` and the FFmpeg exporter actually render from --
+        `animation` itself is never baked into `keyframes` (see `visualkit.models.animation`).
+        A `wipe` preset's `mask.width` curve is dropped when the clip has its own `mask`: that
+        mask's own `width` should not be silently overridden by the (then-inapplicable) wipe.
+        """
+        if self.animation is None:
+            return self.keyframes
+        compiled = compile_animation(self.animation, self.duration, self.transform, self.keyframes)
+        if self.mask is not None:
+            compiled = {k: v for k, v in compiled.items() if not k.startswith("mask.")}
+        return {**compiled, **self.keyframes}
+
+    def effective_mask(self) -> Mask | None:
+        """`mask`, or a full-frame rect mask if `animation` has an unopposed `wipe` preset."""
+        if self.mask is not None:
+            return self.mask
+        if self.animation is not None and "mask.width" in self.effective_keyframes():
+            return Mask(
+                shape="rect", x=0.5, y=0.5, width=1.0, height=1.0, feather=self.animation.wipe_feather
+            )
+        return None
+
+    def mask_at(self, time: "Time | float") -> Mask | None:
+        """The clip's effective `Mask` with any keyed geometry resolved at clip-local `time`."""
+        mask = self.effective_mask()
+        if mask is None:
+            return None
+        data = mask.model_dump()
+        for name, curve in self.effective_keyframes().items():
+            if name.startswith("mask."):
+                data[name.removeprefix("mask.")] = curve.value_at(time)
+        return Mask.model_validate(data)
 
     def set_duration_and_keyframes(
         self, duration: Time, keyframes: dict[str, PropertyCurve] | None = None

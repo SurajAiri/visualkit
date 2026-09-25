@@ -20,6 +20,15 @@ import numpy as np
 import pytest
 from PIL import Image
 
+from tests.rendering_helpers import FPS, H, W
+from tests.rendering_helpers import at as _at
+from tests.rendering_helpers import bbox as _bbox
+from tests.rendering_helpers import centre as _centre
+from tests.rendering_helpers import curve as _curve
+from tests.rendering_helpers import make_clip as _make_clip
+from tests.rendering_helpers import png as _png
+from tests.rendering_helpers import render as _render_clips
+from tests.rendering_helpers import size as _size
 from visualkit.exporters._render_plan import build_clip_stage
 from visualkit.exporters.video import FFmpegVideoExporter
 from visualkit.models import MediaClip, Source, Timeline, Transform
@@ -29,62 +38,13 @@ from visualkit.utils.time import Time
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
 
-W, H, FPS = 320, 180, 10
-
-
-# --------------------------------------------------------------------------- helpers
-def _png(path: Path, size=(W, H), color=(255, 255, 255, 255)) -> Path:
-    Image.new("RGBA", size, color).save(path)
-    return path
-
-
-def _curve(*points) -> PropertyCurve:
-    return PropertyCurve.from_points(points)
-
 
 def _clip(png: Path, *, start: float, duration: float, **kw) -> MediaClip:
-    return MediaClip(
-        id="c",
-        source=Source(source=str(png)),
-        timeline_start=Time.from_seconds(start),
-        duration=Time.from_seconds(duration),
-        **kw,
-    )
+    return _make_clip(png, start=start, duration=duration, **kw)
 
 
 def _render(tmp_path: Path, clip: MediaClip, *, resolution=(W, H)) -> np.ndarray:
-    """Export a one-clip timeline and decode every frame: array of shape (n, h, w, 3)."""
-    timeline = Timeline()
-    timeline.add_clip(clip, track_index=0)
-    out = tmp_path / "out.mp4"
-    timeline.export_to_video(out, fps=FPS, resolution=resolution)
-    w, h = resolution
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", str(out), "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
-        capture_output=True,
-        check=True,
-    ).stdout
-    return np.frombuffer(raw, np.uint8).reshape(-1, h, w, 3).astype(int)
-
-
-def _at(frames: np.ndarray, t: float) -> np.ndarray:
-    return frames[round(t * FPS)]
-
-
-def _bbox(frame: np.ndarray, threshold=128):
-    """(x0, y0, x1, y1) of the bright pixels, or None when the frame is black."""
-    ys, xs = np.where(frame[:, :, 1] > threshold)
-    if len(xs) == 0:
-        return None
-    return xs.min(), ys.min(), xs.max() + 1, ys.max() + 1
-
-
-def _centre(box):
-    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-
-
-def _size(box):
-    return box[2] - box[0], box[3] - box[1]
+    return _render_clips(tmp_path, clip, resolution=resolution)
 
 
 # --------------------------------------------------------------------------- position

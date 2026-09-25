@@ -50,3 +50,37 @@ Variables:
 
 Skip for now: keyframe system, add-ons, compound clip, refined script clip, transition
 Phase 2: chroma key, masking, transition, text_animations, animation(in, overall, out) 
+---
+
+## Shipped (FFmpeg exporter + previews only; Resolve export ignores all of this)
+
+- **Keyframe system**: `VisualClip.keyframes: dict[str, PropertyCurve]` -- position.x/y, scale,
+  rotation, zoom, opacity, plus mask.x/y/width/height/feather when `mask` is set. Clip-local
+  time, unaffected by `speed`. See `visualkit.models.keyframes`.
+- **chroma_key / masking**: `VisualClip.chroma_key: ChromaKey | None`,
+  `VisualClip.mask: Mask | None` (rect/ellipse, feather, invert; geometry is keyframeable). See
+  `visualkit.models.effects`.
+- **animation(in, out)**: `VisualClip.animation: ClipAnimation | None` -- `fade`,
+  `slide_up/down/left/right`, `pop`, `wipe` presets, compiled to the same keyframes/mask above
+  (no second render path). Applies to `TextClip` too. See `visualkit.models.animation`. No
+  "overall" animation phase was requested by the handoff and none was built.
+- **text_animations**: covered by `animation` above (a `TextClip` is a `VisualClip`); there is
+  no separate per-character/typewriter system (measured to fail with real ffmpeg -- see the
+  handoff's §2.9 -- and out of scope).
+- **text_style growth**: outline (`stroke_width`/`stroke_color`), drop shadow, `letter_spacing`,
+  `line_height`, gradient fill (`TextGradient`). See `visualkit.models.clips.text.TextStyle`.
+- **Video alpha**: an animated `CodedVisualClip` renders to lossless FFV1 `render.mkv`
+  (`yuva420p`, or `yuva444p` for odd dimensions) instead of a flat H.264 `render.mp4`, so
+  transparency survives into the exported video. The Resolve export still uses the flat
+  `render.mp4`.
+
+## Not shipped
+
+- **transition**: still unbuilt, as before.
+- **Compound-level keyframes/chroma_key/masking/animation**: `CompoundClip` does not carry
+  these fields itself (only `transform`, unchanged). A `VisualClip` *inside* a compound keeps
+  its own keyframes/chroma_key/mask/animation when the compound is flattened, unless the
+  compound's own `transform` is non-identity and the child is animated (keyframes or
+  `animation`) -- composing an animated curve with a parent transform is refused with a clear
+  `NotImplementedError` rather than silently rendered wrong (the handoff's documented escape
+  hatch for the "compound bake" phase).

@@ -465,6 +465,47 @@ class FFmpegVideoExporter(BaseExporter):
         bg = (
             f"background:{html.escape(style.background_color, quote=True)};" if style.background_color else ""
         )
+
+        def px(value: float) -> str:
+            # Reference-frame pixels -> this canvas; `:g` never yields scientific notation at these sizes.
+            return f"{value * scale:.3f}".rstrip("0").rstrip(".") + "px" if value else "0"
+
+        def css_color(value: str) -> str:
+            return html.escape(value, quote=True)
+
+        extra = ""
+        if style.letter_spacing:
+            extra += f"letter-spacing:{px(style.letter_spacing)};"
+        if style.stroke_width > 0:
+            # `paint-order:stroke fill` puts the fill over the stroke, hiding the half that
+            # falls inside the glyph; doubling the width makes the visible outline `stroke_width`.
+            extra += (
+                f"-webkit-text-stroke:{px(style.stroke_width * 2)} {css_color(style.stroke_color)};"
+                "paint-order:stroke fill;"
+            )
+        shadow = None
+        if style.shadow_color is not None:
+            shadow = (
+                f"{px(style.shadow_offset_x)} {px(style.shadow_offset_y)} "
+                f"{px(style.shadow_blur)} {css_color(style.shadow_color)}"
+            )
+
+        inner = safe_text
+        if style.gradient is not None:
+            g = style.gradient
+            # The gradient is clipped to the glyphs, so `text-shadow` would be painted *over* it;
+            # `drop-shadow` on the same span follows the clipped shape instead.
+            inner = (
+                '<span style="display:inline-block;'
+                f"background:linear-gradient({g.angle:g}deg,{css_color(g.start_color)},{css_color(g.end_color)});"
+                "-webkit-background-clip:text;background-clip:text;"
+                "-webkit-text-fill-color:transparent;color:transparent;"
+                + (f"filter:drop-shadow({shadow});" if shadow else "")
+                + f'">{safe_text}</span>'
+            )
+        elif shadow:
+            extra += f"text-shadow:{shadow};"
+
         return (
             '<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
             '<body style="margin:0;padding:0;background:transparent;'
@@ -473,8 +514,9 @@ class FFmpegVideoExporter(BaseExporter):
             f"<div style=\"font-family:'{family}',system-ui,-apple-system,sans-serif;"
             f"font-size:{font_px}px;font-weight:{html.escape(style.weight, quote=True)};"
             f"color:{html.escape(style.color, quote=True)};text-align:{style.alignment.value};"
-            f'{bg}padding:0 5vw;max-width:90vw;overflow-wrap:break-word;line-height:1.2;">'
-            f"{safe_text}</div></body></html>"
+            f"{bg}padding:0 5vw;max-width:90vw;overflow-wrap:break-word;line-height:{style.line_height:g};"
+            f'{extra}">'
+            f"{inner}</div></body></html>"
         )
 
     def _render_text_to_image(self, clip: TextClip, width: int, height: int) -> Path:

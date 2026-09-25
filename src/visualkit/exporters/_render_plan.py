@@ -6,7 +6,8 @@ been implemented twice and drifted. Both now call `build_clip_stage`.
 
 Stage order (matches the documented contract of `Transform`)::
 
-    fit -> zoom -> [opacity ramp] -> scale -> rotate -> [static opacity]  ...then overlay at position
+    [chroma key] -> fit -> zoom -> [mask, opacity ramp] -> scale -> rotate -> [static opacity]
+    ...then overlay at position
 
 Facts this module is built around (all measured against ffmpeg 6.1.1; see the handoff notes):
 
@@ -24,7 +25,11 @@ Facts this module is built around (all measured against ffmpeg 6.1.1; see the ha
   pre-scale to the largest scale, rotate at a fixed size, then animate the scale *down*.
 * ``crop``'s default offset uses a stale ``iw`` after ``scale eval=frame``; animated zoom
   therefore computes the crop offset from the same expression that sized the frame.
-* ``geq`` never runs above 16x16 here (it was 6x-20x too slow at full resolution).
+* ``geq`` is far too slow at full resolution (6x-20x). The opacity ramp runs it on 16x16 and a
+  mask on a frame of at most ~130k pixels (a quarter of 1080p), both scaled up afterwards.
+* The chroma key comes first, before anything resamples the picture, so the key colour is not
+  blended into edges. A mask and an opacity ramp both modulate alpha, so they are *multiplied*
+  into the clip's own alpha (``alphamerge`` alone would replace it).
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from visualkit.models.clips.visual import Transform, VisualClip
+from visualkit.models.effects import ChromaKey, Mask
 from visualkit.models.keyframes import PropertyCurve, fmt_num, validate_curves
 
 # Tokens substituted when a stage is rendered into a filter_complex (see `ClipStage.statements`).
@@ -116,6 +122,70 @@ def _scaled_dim(base: int, factor_expr: str, divisor: str = "1") -> str:
     return f"max(2,2*round({scaled}/2))"
 
 
+# --------------------------------------------------------------------------- masks / key
+#: Largest frame (in pixels) a mask is generated at with ``geq``; a quarter of 1080p.
+MASK_PIXEL_BUDGET = 130_000
+
+
+def mask_frame_size(width: int, height: int) -> tuple[int, int, int]:
+    """Size ``(w, h)`` a mask is computed at, and the integer factor ``k`` it is scaled up by."""
+    k = max(1, math.ceil(math.sqrt(width * height / MASK_PIXEL_BUDGET)))
+    return max(2, math.ceil(width / k)), max(2, math.ceil(height / k)), k
+
+
+def mask_level_expr(mask: Mask, curves: Mapping[str, PropertyCurve], clip_start_s: float) -> str:
+    """A ``geq`` luma expression (0-255, 255 = visible) for `mask`, in the mask frame's pixels.
+
+    Coverage is ``clip(0.5 - d / F, 0, 1)`` where ``d`` is the signed distance to the outline in
+    pixels (negative inside) and ``F`` the feather width (at least one pixel, which is the
+    anti-aliasing). Animated parameters are evaluated once per pixel into ``st``/``ld`` slots
+    rather than pasted into every use.
+    """
+    prelude: list[str] = []
+    slots: dict[str, str] = {}
+
+    def param(name: str, slot: int) -> str:
+        key = f"mask.{name}"
+        if key in curves:
+            prelude.append(f"st({slot},{curves[key].to_expr(clip_start_s, var='T')})")
+            return f"ld({slot})"
+        return fmt_num(getattr(mask, name))
+
+    cx, cy = param("x", 0), param("y", 1)
+    w, h, feather = param("width", 2), param("height", 3), param("feather", 4)
+    slots.update(cx=cx, cy=cy, w=w, h=h, f=feather)
+
+    px = f"(X+0.5-({cx})*W)"
+    py = f"(Y+0.5-({cy})*H)"
+    half_w = f"(({w})*W/2)"
+    half_h = f"(({h})*H/2)"
+    band = f"max(1,({feather})*min(W,H))"
+
+    if mask.shape == "rect":
+        qx, qy = f"(abs({px})-{half_w})", f"(abs({py})-{half_h})"
+        dist = f"(hypot(max({qx},0),max({qy},0))+min(max({qx},{qy}),0))"
+    else:
+        a, b = f"max({half_w},0.001)", f"max({half_h},0.001)"
+        r = f"hypot({px}/{a},{py}/{b})"
+        grad = f"(hypot({px}/({a}*{a}),{py}/({b}*{b}))/max({r},0.000001))"
+        dist = f"(({r}-1)/max({grad},0.000000001))"
+
+    coverage = f"clip(0.5-{dist}/{band},0,1)"
+    if mask.invert:
+        coverage = f"(1-{coverage})"
+    return ";".join([*prelude, f"255*{coverage}"])
+
+
+def _key_filters(key: ChromaKey) -> list[str]:
+    """The filters that key `key.color` out (then, optionally, de-spill), ending in rgba."""
+    options = f"color={key.ffmpeg_color}:similarity={fmt_num(key.similarity)}:blend={fmt_num(key.blend)}"
+    filters = [f"{key.method}={options}"]
+    if key.despill:
+        filters.append(f"despill=type={key.despill_type}")
+    filters.append("format=rgba")
+    return filters
+
+
 # --------------------------------------------------------------------------- the builder
 class _Graph:
     """Accumulates plain filters into chains and closes them into labelled statements."""
@@ -149,6 +219,8 @@ def _build(
     width: int,
     height: int,
     clip_start_s: float,
+    chroma_key: ChromaKey | None = None,
+    mask: Mask | None = None,
 ) -> ClipStage:
     validate_curves(dict(curves))  # names/bounds only; guards against in-place dict edits after construction
 
@@ -157,6 +229,12 @@ def _build(
 
     keyed = set(curves)
     g = _Graph()
+    rgba = False
+
+    # 0. Chroma key: before anything resamples the picture (fit scales it).
+    if chroma_key is not None:
+        g.add(*_key_filters(chroma_key))
+        rgba = True
 
     # 1. Fit to explicit Size, or to the canvas if Size is (0, 0).
     if transform.size.width > 0 and transform.size.height > 0:
@@ -184,24 +262,43 @@ def _build(
         crop_h = max(1, round(target_h / transform.zoom))
         g.add(f"crop={crop_w}:{crop_h}:(iw-{crop_w})/2:(ih-{crop_h})/2", f"scale={target_w}:{target_h}")
 
-    rgba = False
-
-    # 3. Animated opacity, applied here while the frame still has its fixed footprint so the
-    # ramp always matches the frame size (scale/rotate that follow carry the alpha along).
+    # 3. Mask and animated opacity, applied here while the frame still has its fixed footprint so
+    # each modulator always matches the frame size (scale/rotate that follow carry the alpha along).
+    # Each becomes a gray frame derived from the clip's own frames (so timestamps agree by
+    # construction); their product is merged into the clip's alpha.
+    modulators: list[str] = []
+    if mask is not None:
+        mw, mh, k = mask_frame_size(target_w, target_h)
+        level = mask_level_expr(mask, curves, clip_start_s)
+        sharpen = ""
+        if k > 1 and mask.feather == 0 and "mask.feather" not in keyed:
+            # A hard edge computed at 1/k resolution ramps over k pixels once scaled up; a steep
+            # curve squeezes it back to about one.
+            sharpen = f"lut=y='clip(128+(val-128)*{k},0,255)',"
+        modulators.append(
+            f"crop=w='min(iw,16)':h='min(ih,16)':x=0:y=0,scale={mw}:{mh},format=gray,"
+            f"geq=lum='{level}',scale={target_w}:{target_h}:flags=bilinear,{sharpen}format=gray"
+        )
     if "opacity" in keyed:
         # opacity is 0-100; the ramp is a 0-255 gray level.
         level = f"255*({expr('opacity', var='T')})/100"
-        g.add("format=rgba", "split=3")
-        g.close(f"[{_UID}c][{_UID}b][{_UID}a]")
-        g.side_branch(
-            f"[{_UID}b]crop=w='min(iw,16)':h='min(ih,16)':x=0:y=0,format=gray,"
-            f"geq=lum='{level}',scale={target_w}:{target_h}:flags=bilinear,format=gray[{_UID}r]"
+        modulators.append(
+            f"crop=w='min(iw,16)':h='min(ih,16)':x=0:y=0,format=gray,"
+            f"geq=lum='{level}',scale={target_w}:{target_h}:flags=bilinear,format=gray"
         )
-        g.side_branch(f"[{_UID}a]alphaextract[{_UID}al]")
+    if modulators:
+        n = len(modulators)
+        branch_labels = "".join(f"[{_UID}m{i}]" for i in range(n))
+        g.add("format=rgba", f"split={n + 2}")
+        g.close(f"[{_UID}c][{_UID}a]{branch_labels}")
+        for i, chain in enumerate(modulators):
+            g.side_branch(f"[{_UID}m{i}]{chain}[{_UID}g{i}]")
+        g.side_branch(f"[{_UID}a]alphaextract[{_UID}p0]")
         # multiply (not alphamerge alone): alphamerge REPLACES alpha, which would erase the
         # source's own transparency (PNG, text, keyed video).
-        g.side_branch(f"[{_UID}al][{_UID}r]blend=all_mode=multiply:shortest=1[{_UID}m]")
-        g.restart_from(f"[{_UID}c][{_UID}m]")
+        for i in range(n):
+            g.side_branch(f"[{_UID}p{i}][{_UID}g{i}]blend=all_mode=multiply:shortest=1[{_UID}p{i + 1}]")
+        g.restart_from(f"[{_UID}c][{_UID}p{n}]")
         g.add("alphamerge")
         rgba = True
 
@@ -327,7 +424,15 @@ def build_clip_stage(clip: VisualClip, width: int, height: int, *, clip_start_s:
     because ffmpeg's ``t`` is absolute timeline time. A single-frame preview passes ``-time`` so
     that ``t = 0`` corresponds to `time` seconds into the clip.
     """
-    return _build(clip.transform, clip.keyframes, width, height, clip_start_s)
+    return _build(
+        clip.transform,
+        clip.effective_keyframes(),
+        width,
+        height,
+        clip_start_s,
+        chroma_key=clip.chroma_key,
+        mask=clip.effective_mask(),
+    )
 
 
 def build_static_stage(transform: Transform, width: int, height: int) -> ClipStage:

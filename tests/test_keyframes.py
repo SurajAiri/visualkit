@@ -132,10 +132,15 @@ class TestClipLevelValidation:
         assert clip.keyframes == {}
 
     def test_every_allowed_property_maps_to_something_real(self):
-        t = Transform()
+        from visualkit.models.effects import Mask
+
+        t, m = Transform(), Mask()
         for name in KEYFRAMEABLE_PROPERTIES:
-            base = name.split(".")[0]
-            assert hasattr(t, base), name
+            base, _, attr = name.partition(".")
+            if base == "mask":
+                assert hasattr(m, attr), name  # mask geometry lives on Mask, not Transform
+            else:
+                assert hasattr(t, base), name
 
     def test_text_clips_can_be_keyframed_too(self):
         TextClip(text="hi", duration=Time(2), keyframes={"scale": curve((0, 0.5), (1, 1))})
@@ -595,3 +600,51 @@ class TestCompoundClipKeyframes:
     def test_animated_child_under_a_transformed_compound_is_refused_not_miscomposed(self):
         with pytest.raises(NotImplementedError, match="animated"):
             self._flatten(transform=Transform(scale=0.5))
+
+
+class TestCompoundClipOtherEffectsSurviveFlattening(TestCompoundClipKeyframes):
+    """`chroma_key`, `mask` and `animation` ride along through `to_media_clip`/flatten just like
+    `keyframes` do (see `TestCompoundClipKeyframes` above); `animation` shares the keyframe
+    guard against a transformed parent, since it compiles to the exact same kind of curve.
+    """
+
+    @staticmethod
+    def _flatten_with(child_extra: dict, *, transform=None):
+        from visualkit.models import CompoundClip
+        from visualkit.models.clips.coded_visual import CodedVisualClip
+
+        inner = Timeline()
+        inner.add_clip(MediaClip(id="kid", source=Source(source="x.mp4"), duration=Time(4), **child_extra))
+        comp = CompoundClip(
+            id="comp",
+            duration=Time(4),
+            inner_timeline=inner,
+            **({"transform": transform} if transform else {}),
+        )
+        root = Timeline()
+        root.add_clip(comp)
+        return root.flatten().video_tracks[0].clips[0]
+
+    def test_chroma_key_survives(self):
+        from visualkit.models.effects import ChromaKey
+
+        clip = self._flatten_with({"chroma_key": ChromaKey(color="#0000ff")}, transform=Transform(scale=0.5))
+        assert clip.chroma_key.color == "#0000FF"
+
+    def test_mask_survives(self):
+        from visualkit.models.effects import Mask
+
+        clip = self._flatten_with({"mask": Mask(shape="ellipse", width=0.3)}, transform=Transform(scale=0.5))
+        assert clip.mask.shape == "ellipse" and clip.mask.width == 0.3
+
+    def test_unopposed_animation_survives(self):
+        from visualkit.models.animation import ClipAnimation
+
+        clip = self._flatten_with({"animation": ClipAnimation(in_preset="fade")})
+        assert clip.effective_keyframes()["opacity"].value_at(0) == 0
+
+    def test_animation_under_a_transformed_parent_is_refused_like_keyframes(self):
+        from visualkit.models.animation import ClipAnimation
+
+        with pytest.raises(NotImplementedError, match="animated"):
+            self._flatten_with({"animation": ClipAnimation(in_preset="fade")}, transform=Transform(scale=0.5))
