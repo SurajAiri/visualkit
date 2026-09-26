@@ -11,6 +11,7 @@ from visualkit.models import (
     Variable,
     VariableType,
 )
+from visualkit.utils.exceptions import TemplateParameterError
 from visualkit.utils.time import Time
 
 
@@ -162,6 +163,120 @@ def test_compound_clip_direct_namespaced_parameter():
 
     _, updated_cv = inner.get_clip("cv_card")
     assert updated_cv.get_resolved_variables()["theme"] == "dark"
+
+
+class TestDottedTargetVariable:
+    """`ExposedParameter.target_variable` (and a direct 'clip_id.a.b' parameter) may reach a
+    field nested inside the target clip's own pydantic fields, e.g. 'style.color'."""
+
+    @staticmethod
+    def _titled_compound(**exposed_kwargs):
+        from visualkit.models import TextStyle
+
+        inner = Timeline()
+        inner.add_clip(
+            TextClip(
+                id="title", text="Hello", duration=Time.from_seconds(2), style=TextStyle(color="#ffffff")
+            )
+        )
+        compound = CompoundClip(
+            inner_timeline=inner,
+            exposed_parameters=[
+                ExposedParameter(
+                    name="title_color",
+                    target_clip_id="title",
+                    target_variable="style.color",
+                    **exposed_kwargs,
+                )
+            ],
+        )
+        return inner, compound
+
+    def test_exposed_parameter_reaches_a_nested_field(self):
+        inner, compound = self._titled_compound()
+        compound.set_parameter("title_color", "#ff0000")
+        _, updated = inner.get_clip("title")
+        assert updated.style.color == "#ff0000"
+
+    def test_default_value_is_applied_through_a_nested_path_too(self):
+        inner, compound = self._titled_compound(default="#00ff00")
+        compound.apply_parameters()
+        _, updated = inner.get_clip("title")
+        assert updated.style.color == "#00ff00"
+
+    def test_transform_opacity_is_reachable_too(self):
+        from visualkit.models import MediaClip, Source
+
+        inner = Timeline()
+        inner.add_clip(MediaClip(id="bg", source=Source(source="x.mp4"), duration=Time.from_seconds(2)))
+        compound = CompoundClip(
+            inner_timeline=inner,
+            exposed_parameters=[
+                ExposedParameter(name="bg_opacity", target_clip_id="bg", target_variable="transform.opacity")
+            ],
+        )
+        compound.set_parameter("bg_opacity", 40)
+        _, updated = inner.get_clip("bg")
+        assert updated.transform.opacity == 40
+
+    def test_direct_namespaced_parameter_can_also_be_dotted(self):
+        from visualkit.models import TextStyle
+
+        inner = Timeline()
+        inner.add_clip(TextClip(id="t", text="Hi", duration=Time.from_seconds(2), style=TextStyle()))
+        compound = CompoundClip(inner_timeline=inner)
+        compound.set_parameter("t.style.color", "#123456")
+        _, updated = inner.get_clip("t")
+        assert updated.style.color == "#123456"
+
+    def test_out_of_range_value_raises_in_strict_mode_and_is_skipped_otherwise(self):
+        # Matches CompoundClip.apply_parameters' existing non-strict/strict convention: a bad
+        # template parameter is skipped unless strict=True (the mode export uses).
+        inner, compound = self._titled_compound()
+        compound.set_parameter("title_color", "not-a-colour")
+        _, unchanged = inner.get_clip("title")
+        assert unchanged.style.color == "#ffffff"
+        compound.parameters["title_color"] = "not-a-colour"
+        with pytest.raises(TemplateParameterError, match="not-a-colour"):
+            compound.apply_parameters(strict=True)
+
+    def test_unset_optional_nested_field_gives_a_clear_error(self):
+        """`TextStyle.gradient` defaults to None; targeting `gradient.start_color` on a clip
+        that never set a gradient must not raise a bare AttributeError."""
+        from visualkit.models import TextStyle
+
+        inner = Timeline()
+        inner.add_clip(TextClip(id="t", text="Hi", duration=Time.from_seconds(2), style=TextStyle()))
+        compound = CompoundClip(
+            inner_timeline=inner,
+            exposed_parameters=[
+                ExposedParameter(
+                    name="grad_start", target_clip_id="t", target_variable="style.gradient.start_color"
+                )
+            ],
+        )
+        compound.parameters["grad_start"] = "#ff0000"
+        with pytest.raises(TemplateParameterError, match="gradient"):
+            compound.apply_parameters(strict=True)
+
+    def test_unknown_nested_field_gives_a_clear_error(self):
+        inner, compound = self._titled_compound()
+        compound.exposed_parameters[0].target_variable = "style.not_a_real_field"
+        compound.parameters["title_color"] = "#ff0000"
+        with pytest.raises(TemplateParameterError, match="not_a_real_field"):
+            compound.apply_parameters(strict=True)
+
+    def test_a_protected_field_cannot_be_reached_through_a_dotted_path(self):
+        inner, compound = self._titled_compound()
+        compound.exposed_parameters[0].target_variable = "inner_timeline.tracks"
+        compound.parameters["title_color"] = "anything"
+        with pytest.raises(TemplateParameterError, match="protected"):
+            compound.apply_parameters(strict=True)
+
+    def test_json_round_trip_preserves_the_dotted_target(self):
+        _, compound = self._titled_compound()
+        restored = CompoundClip.model_validate_json(compound.model_dump_json())
+        assert restored.exposed_parameters[0].target_variable == "style.color"
 
 
 def test_json_roundtrip_serialization():

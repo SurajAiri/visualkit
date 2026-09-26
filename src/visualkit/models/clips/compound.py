@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from visualkit.models.variable import Variable
 from visualkit.utils.base_model import VisualKitModel
@@ -44,7 +44,10 @@ class ExposedParameter(VisualKitModel):
     target_clip_id: str = Field(..., description="ID of the target clip inside inner_timeline")
     target_variable: str = Field(
         ...,
-        description="Property or variable name on the target clip (e.g. 'text', 'headline', 'bg_color')",
+        description=(
+            "Property or variable name on the target clip (e.g. 'text', 'headline', 'bg_color'), "
+            "or a dotted path into a nested field (e.g. 'style.color', 'transform.opacity')"
+        ),
     )
     label: str | None = Field(default=None, description="Human-friendly label for UI")
     description: str | None = Field(
@@ -270,11 +273,22 @@ class CompoundClip(BaseClip):
 
     @classmethod
     def _apply_val_to_clip(cls, clip: Any, var_name: str, value: Any) -> None:
-        """Inject `value` into a clip's variable or field; raises `TemplateParameterError` if impossible."""
-        if var_name in _PROTECTED_FIELDS:
+        """Inject `value` into a clip's variable or field; raises `TemplateParameterError` if impossible.
+
+        `var_name` may be dotted (`style.color`, `transform.opacity`) to reach a field nested
+        one or more levels inside the clip's own pydantic fields, each of which must itself be
+        a model -- e.g. `TextClip.style.color`, `MediaClip.transform.opacity`. A dotted path
+        always targets a real field at each step (never `set_variable`/`set_parameter`, which
+        only apply to a clip's own top-level variables); every segment, including the first, is
+        checked against `_PROTECTED_FIELDS`.
+        """
+        if var_name.split(".", 1)[0] in _PROTECTED_FIELDS:
             raise TemplateParameterError(
                 f"{var_name!r} is a protected field and cannot be set by a template parameter."
             )
+        if "." in var_name:
+            cls._apply_val_to_nested_field(clip, var_name, value)
+            return
         if hasattr(clip, "set_parameter") and isinstance(clip, CompoundClip):
             clip.set_parameter(var_name, value)
         elif hasattr(clip, "set_variable"):
@@ -285,3 +299,35 @@ class CompoundClip(BaseClip):
             raise TemplateParameterError(
                 f"{type(clip).__name__} '{clip.id}' has no variable or property {var_name!r}."
             )
+
+    @classmethod
+    def _apply_val_to_nested_field(cls, clip: Any, path: str, value: Any) -> None:
+        """Set `value` at a dotted `path` (e.g. `style.color`) by walking the clip's own
+        pydantic model fields; the object at each step but the last must be a model instance
+        (`None` -- an unset optional field like `TextStyle.gradient` -- is reported clearly
+        rather than raising a bare `AttributeError`). The final `setattr` runs through that
+        model's own field validator, so an out-of-range or wrong-type value still raises."""
+        parts = path.split(".")
+        obj, seen = clip, []
+        for part in parts[:-1]:
+            seen.append(part)
+            if part in _PROTECTED_FIELDS or part not in type(obj).model_fields:
+                raise TemplateParameterError(
+                    f"{type(obj).__name__} '{getattr(clip, 'id', '?')}' has no field {part!r} "
+                    f"(from target_variable {path!r})."
+                )
+            obj = getattr(obj, part)
+            if obj is None:
+                raise TemplateParameterError(
+                    f"{type(clip).__name__} '{clip.id}': {'.'.join(seen)!r} is not set, so "
+                    f"{path!r} cannot be reached."
+                )
+        last = parts[-1]
+        if last not in type(obj).model_fields:
+            raise TemplateParameterError(
+                f"{type(obj).__name__} has no field {last!r} (from target_variable {path!r})."
+            )
+        try:
+            setattr(obj, last, value)
+        except ValidationError as err:
+            raise TemplateParameterError(f"Invalid value {value!r} for {path!r}: {err}") from err
