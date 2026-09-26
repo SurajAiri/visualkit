@@ -47,7 +47,9 @@ dev = [
     "playwright>=1.40",
     "pillow>=10.0",
     "ruff>=0.12.1",
+    "mkdocs-material>=9.7.7",
 ]
+docs = ["mkdocs-material>=9.7.7"]
 
 
 [tool.setuptools.packages.find]
@@ -67,3 +69,10 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
     "browser: drives a real headless Chrome/Chromium (skipped when none is installed)",
 ]
+
+
+[project.urls]
+Homepage = "https://surajairi.github.io/visualkit/"
+Documentation = "https://surajairi.github.io/visualkit/"
+Repository = "https://github.com/surajairi/visualkit"
+Issues = "https://github.com/surajairi/visualkit/issues"

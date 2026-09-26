@@ -2,7 +2,8 @@
 
 Non-obvious current behavior that's easy to assume otherwise. This is a
 condensed, present-tense version of the "behavior changes" section in
-[`CHANGES.md`](../CHANGES.md) — read that file if you want the history and
+[`CHANGES.md`](https://github.com/SurajAiri/visualkit/blob/main/CHANGES.md)
+(the repo root one, one level up from here) — read that file if you want the history and
 regression-test detail behind each one; this page just tells you what's
 true today.
 

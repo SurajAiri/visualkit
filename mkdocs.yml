@@ -1,0 +1,111 @@
+site_name: VisualKit
+site_description: A programmable video-editing engine — timelines, compound clip templates, and code-rendered (HTML/CSS/JS) visuals, exportable to video or DaVinci Resolve
+site_author: Suraj Airi
+site_url: https://SurajAiri.github.io/visualkit/
+
+# TODO: point these at the real GitHub repo (this couldn't be confirmed from
+# the codebase itself — update the slug below before publishing).
+repo_name: SurajAiri/visualkit
+repo_url: https://github.com/SurajAiri/visualkit
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  # TODO: drop docs/assets/favicon.ico and docs/assets/logo.png in, then
+  # uncomment these two lines.
+  # favicon: assets/favicon.ico
+  # logo: assets/logo.png
+
+  palette:
+    - scheme: slate
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+    - scheme: default
+      primary: indigo
+      accent: blue
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+  features:
+    # Navigation
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.instant
+    - navigation.top
+    - navigation.footer
+
+    # Search
+    - search.highlight
+    - search.share
+    - search.suggest
+
+    # Code blocks
+    - content.code.copy
+    - content.code.annotate
+
+    # TOC follows scrolling
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - md_in_html
+
+  - toc:
+      permalink: true
+
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.keys
+  - pymdownx.magiclink
+  - pymdownx.emoji
+
+plugins:
+  - search
+
+nav:
+  - Home: README.md
+
+  - Getting Started:
+      - Installation & Quickstart: 01-getting-started.md
+      - Core Concepts: 02-concepts.md
+
+  - Building Timelines:
+      - Clips Reference: 03-clips-reference.md
+      - Templates & Compound Clips: 04-templates-and-compounds.md
+      - Coded Visuals: 05-coded-visuals.md
+      - Keyframes & Effects: 06-keyframes-and-effects.md
+
+  - Exporting:
+      - Video & DaVinci Resolve: 07-exporting.md
+      - Errors & Validation: 08-errors-and-validation.md
+
+  - For Agents:
+      - Agent Guide: 09-agent-guide.md
+
+  - Reference:
+      - Pitfalls: 10-pitfalls.md
+      - Roadmap / Not Built Yet: 11-roadmap.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/SurajAiri
+
+copyright: Copyright © 2026 Suraj Airi

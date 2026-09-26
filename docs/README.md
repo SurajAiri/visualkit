@@ -5,7 +5,11 @@ clips, text, audio, reusable "compound" templates, and code-rendered
 (HTML/CSS/JS) visuals — and exporting them to a standalone video or to a
 DaVinci Resolve project.
 
-This `docs/` folder is the full guide. The top-level [`README.md`](../README.md)
+This `docs/` folder is the full guide. The
+[top-level `README.md`](https://github.com/SurajAiri/visualkit/blob/main/README.md)
+(the repo root one, one level up from here — linked via GitHub rather than a
+relative path so this page also builds cleanly as an MkDocs site; update the
+repo slug here together with `mkdocs.yml`'s `repo_url` if it changes)
 stays as the short pitch + quick start; everything below goes deeper, is kept
 in sync with the actual source (`src/visualkit/`) rather than aspirational,
 and is written for two readers at once:

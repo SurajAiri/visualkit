@@ -19,6 +19,14 @@ file for import into DaVinci Resolve.
 > the flat H.264 `render.mp4`. Transitions and per-character text animation
 > are on the roadmap (see `notes/`) but not yet built.
 
+## Documentation
+
+This README is the quick pitch and quick start. For the full guide —
+core concepts, a complete clip/field reference, coded-visual authoring,
+templates, keyframes/effects, exporting, error handling, a dedicated guide
+for code-generating agents, and a list of known pitfalls — see
+[`VisualKit Docs`](https://SurajAiri.github.io/visualkit/).
+
 ## Requirements
 
 - Python >= 3.12
@@ -36,14 +44,11 @@ file for import into DaVinci Resolve.
 ## Installation
 
 ```bash
-pip install visualkit              # core
-pip install "visualkit[render]"    # + animated coded visuals
-
-# with uv
-# uv add visualkit
-# uv add "visualkit[render]"
+pip install -e .              # core
+pip install -e ".[render]"    # + animated coded visuals
 ```
 
+(This project isn't yet published to PyPI; install from a local checkout.)
 
 ## Quick start
 
